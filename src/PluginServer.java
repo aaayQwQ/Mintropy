@@ -11,20 +11,19 @@ import java.util.jar.JarEntry;
 /**
  * Mintropy MC Server - 纯Java高性能Minecraft服务器
  * UTF-8无BOM编码
- * 支持地形生成、玩家装备、建筑系统
- * 无验证，性能优先
+ * 修复所有字符串长度问题
  * 
- * @version 4.1.0
+ * @version 4.2.0
  */
 public class PluginServer {
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "4.1.0";
+    private static String VERSION = "4.2.0";
     private static String MC_VERSION = "1.20.4";
     private static int PROTOCOL_VERSION = 765;
     private static int PORT = 25565;
     private static String SERVER_NAME = "Mintropy";
     private static int MAX_PLAYERS = 100;
-    private static String MOTD = "Mintropy Server";
+    private static String MOTD = "Mintropy";
     private static int VIEW_DISTANCE = 8;
     private static int SIMULATION_DISTANCE = 8;
     
@@ -211,7 +210,7 @@ public class PluginServer {
     // ============ MC玩家类 ============
     public static class MCPlayer {
         private final String username;
-        private final UUID uuid;
+        private final String uuid;
         private final Socket socket;
         private final DataInputStream input;
         private final DataOutputStream output;
@@ -227,7 +226,7 @@ public class PluginServer {
         private int experience = 0;
         private int level = 0;
         
-        public MCPlayer(String username, UUID uuid, Socket socket) throws IOException {
+        public MCPlayer(String username, String uuid, Socket socket) throws IOException {
             this.username = username;
             this.uuid = uuid;
             this.socket = socket;
@@ -236,7 +235,7 @@ public class PluginServer {
         }
         
         public String getUsername() { return username; }
-        public UUID getUUID() { return uuid; }
+        public String getUUID() { return uuid; }
         public double getX() { return x; }
         public double getY() { return y; }
         public double getZ() { return z; }
@@ -250,8 +249,8 @@ public class PluginServer {
         
         public void sendMessage(String message) {
             try {
-                if (message.length() > 256) {
-                    message = message.substring(0, 256);
+                if (message.length() > 100) {
+                    message = message.substring(0, 100);
                 }
                 
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
@@ -309,8 +308,8 @@ public class PluginServer {
         
         public void disconnect(String reason) {
             try {
-                if (reason.length() > 100) {
-                    reason = reason.substring(0, 100);
+                if (reason.length() > 50) {
+                    reason = reason.substring(0, 50);
                 }
                 
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
@@ -366,8 +365,8 @@ public class PluginServer {
 
         @Override
         public void broadcastMessage(String message) {
-            if (message.length() > 256) {
-                message = message.substring(0, 256);
+            if (message.length() > 100) {
+                message = message.substring(0, 100);
             }
             final String msg = message;
             onlinePlayers.values().forEach(player -> player.sendMessage(msg));
@@ -475,7 +474,7 @@ public class PluginServer {
                 defaultConfig.setProperty("server-name", "Mintropy");
                 defaultConfig.setProperty("server-port", "25565");
                 defaultConfig.setProperty("max-players", "100");
-                defaultConfig.setProperty("motd", "Mintropy Server");
+                defaultConfig.setProperty("motd", "Mintropy");
                 defaultConfig.setProperty("mc-version", "1.20.4");
                 defaultConfig.setProperty("view-distance", "8");
                 defaultConfig.setProperty("simulation-distance", "8");
@@ -493,7 +492,8 @@ public class PluginServer {
             SERVER_NAME = serverConfig.getProperty("server-name", "Mintropy");
             PORT = Integer.parseInt(serverConfig.getProperty("server-port", "25565"));
             MAX_PLAYERS = Integer.parseInt(serverConfig.getProperty("max-players", "100"));
-            MOTD = serverConfig.getProperty("motd", "Mintropy Server");
+            MOTD = serverConfig.getProperty("motd", "Mintropy");
+            if (MOTD.length() > 48) MOTD = MOTD.substring(0, 48);
             MC_VERSION = serverConfig.getProperty("mc-version", "1.20.4");
             VIEW_DISTANCE = Integer.parseInt(serverConfig.getProperty("view-distance", "8"));
             SIMULATION_DISTANCE = Integer.parseInt(serverConfig.getProperty("simulation-distance", "8"));
@@ -657,12 +657,13 @@ public class PluginServer {
         }
         
         String username = readString(packet, 16);
-        UUID playerUUID = UUID.randomUUID();
+        // 使用简短的UUID
+        String playerUUID = UUID.randomUUID().toString().replace("-", "").substring(0, 32);
         
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream response = new DataOutputStream(buffer);
         writeVarInt(response, 0x02);
-        writeString(response, playerUUID.toString());
+        writeString(response, playerUUID);
         writeString(response, username);
         
         writeVarInt(output, buffer.size());
@@ -744,7 +745,7 @@ public class PluginServer {
                 
                 switch (packetId) {
                     case 0x05:
-                        String message = readString(packet, 256);
+                        String message = readString(packet, 100);
                         handlePlayerChat(player, message);
                         break;
                         
