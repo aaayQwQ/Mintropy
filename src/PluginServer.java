@@ -11,13 +11,13 @@ import java.util.jar.JarEntry;
 /**
  * Mintropy MC Server - 纯Java高性能Minecraft服务器
  * UTF-8无BOM编码
- * 修复所有字符串长度问题
+ * 彻底修复字符串长度问题
  * 
- * @version 4.2.0
+ * @version 4.3.0
  */
 public class PluginServer {
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "4.2.0";
+    private static String VERSION = "4.3.0";
     private static String MC_VERSION = "1.20.4";
     private static int PROTOCOL_VERSION = 765;
     private static int PORT = 25565;
@@ -657,8 +657,8 @@ public class PluginServer {
         }
         
         String username = readString(packet, 16);
-        // 使用简短的UUID
-        String playerUUID = UUID.randomUUID().toString().replace("-", "").substring(0, 32);
+        // 使用固定短UUID
+        String playerUUID = "00000000-0000-0000-0000-000000000001";
         
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream response = new DataOutputStream(buffer);
@@ -695,7 +695,7 @@ public class PluginServer {
         writeVarInt(packet, 1);
         writeString(packet, "minecraft:overworld");
         writeString(packet, "minecraft:overworld");
-        writeString(packet, world.name);
+        writeString(packet, "world");
         packet.writeLong(0);
         packet.writeByte(MAX_PLAYERS);
         writeVarInt(packet, VIEW_DISTANCE);
