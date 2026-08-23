@@ -14,13 +14,13 @@ import java.util.jar.JarEntry;
  * 支持插件系统、世界生成与持久化、玩家数据、建筑等
  * 无正版验证，性能优先
  * 
- * @version 5.1.0
+ * @version 5.2.0
  */
 public class PluginServer {
 
     // ==================== 服务器基本信息 ====================
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "5.1.0";
+    private static String VERSION = "5.2.0";
     private static String MC_VERSION = "1.20.1";          // 兼容1.20.1
     private static int PROTOCOL_VERSION = 763;            // 1.20.1协议号
     private static int PORT = 25565;
@@ -60,9 +60,6 @@ public class PluginServer {
             worldFolder.mkdirs();
         }
 
-        /**
-         * 获取指定坐标的区块，若不存在则生成或从磁盘加载
-         */
         public Chunk getChunk(int chunkX, int chunkZ) {
             long key = ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
             return chunks.computeIfAbsent(key, k -> loadOrGenerateChunk(chunkX, chunkZ));
@@ -77,19 +74,14 @@ public class PluginServer {
             }
         }
 
-        /**
-         * 生成新区块：地形、矿石、树木等
-         */
         private Chunk generateChunk(int chunkX, int chunkZ, File file) {
             Chunk chunk = new Chunk(chunkX, chunkZ);
 
-            // 基础地形
             for (int x = 0; x < 16; x++) {
                 for (int z = 0; z < 16; z++) {
                     int worldX = chunkX * 16 + x;
                     int worldZ = chunkZ * 16 + z;
 
-                    // 简单高度图，使用正弦余弦组合
                     int height = 64 + (int)(Math.sin(worldX * 0.1) * Math.cos(worldZ * 0.1) * 5);
 
                     for (int y = 0; y <= height; y++) {
@@ -104,12 +96,10 @@ public class PluginServer {
                         chunk.setBlock(x, y, z, blockType);
                     }
 
-                    // 随机生成树木
                     if (random.nextInt(100) < 5 && height > 64) {
                         generateTree(chunk, x, height + 1, z);
                     }
 
-                    // 随机生成矿石
                     if (random.nextInt(100) < 2) {
                         generateOreVein(chunk, x, z, height);
                     }
@@ -159,9 +149,6 @@ public class PluginServer {
             return chunk;
         }
 
-        /**
-         * 保存所有已加载区块到磁盘
-         */
         public void saveAll() {
             chunks.forEach((key, chunk) -> {
                 File chunkFile = new File(worldFolder, "chunk_" + chunk.chunkX + "_" + chunk.chunkZ + ".dat");
@@ -245,7 +232,6 @@ public class PluginServer {
         private float yaw = 0, pitch = 0;
         private boolean onGround = true;
 
-        // 装备与背包（简化）
         private final String[] equipment = new String[6];
         private final String[] inventory = new String[36];
 
@@ -616,7 +602,6 @@ public class PluginServer {
         output.write(buffer.toByteArray());
         output.flush();
 
-        // 接收Ping，返回Pong
         packetLength = readVarInt(input);
         packetData = new byte[packetLength];
         input.readFully(packetData);
@@ -643,7 +628,7 @@ public class PluginServer {
         }
 
         String username = readString(packet, 16);
-        String playerUUID = "00000000-0000-0000-0000-000000000001"; // 固定UUID
+        String playerUUID = "00000000-0000-0000-0000-000000000001";
 
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream response = new DataOutputStream(buffer);
@@ -677,7 +662,7 @@ public class PluginServer {
         writeVarInt(packet, 1); // Dimension count
         writeString(packet, "minecraft:overworld"); // Dimension name
 
-        // ===== 修复：发送完整的空 NBT 复合标签 =====
+        // ===== 关键：完整的空 NBT 复合标签 =====
         packet.writeByte(0x0A); // TAG_Compound
         packet.writeShort(0);   // 名称长度 0
         packet.writeByte(0x00); // TAG_End
