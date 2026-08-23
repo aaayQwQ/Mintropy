@@ -1,0 +1,87 @@
+name: Build Mintropy Server
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    
+    - name: Create build directory
+      run: mkdir -p build
+    
+    - name: Compile PluginServer
+      run: |
+        javac -encoding UTF-8 -d build src/PluginServer.java
+        echo "编译完成"
+    
+    - name: Create API library
+      run: |
+        cd build
+        # 提取API接口类
+        jar cf plugin-server-api.jar PluginServer\$Plugin.class \
+          PluginServer\$CommandExecutor.class \
+          PluginServer\$ServerAPI.class
+        cd ..
+        mkdir -p lib
+        cp build/plugin-server-api.jar lib/
+        echo "API库创建完成"
+    
+    - name: Package server JAR
+      run: |
+        cd build
+        # 创建MANIFEST
+        echo "Main-Class: PluginServer" > MANIFEST.MF
+        echo "Class-Path: ." >> MANIFEST.MF
+        echo "" >> MANIFEST.MF
+        
+        # 打包所有类
+        jar cfm plugin-server.jar MANIFEST.MF *.class
+        cd ..
+        echo "服务器JAR打包完成"
+    
+    - name: Upload server JAR
+      uses: actions/upload-artifact@v4
+      with:
+        name: plugin-server
+        path: build/plugin-server.jar
+        retention-days: 90
+    
+    - name: Upload API library
+      uses: actions/upload-artifact@v4
+      with:
+        name: plugin-server-api
+        path: lib/plugin-server-api.jar
+        retention-days: 90
+    
+    - name: Create Release
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ github.run_number }}
+        name: Release v${{ github.run_number }}
+        files: |
+          build/plugin-server.jar
+          lib/plugin-server-api.jar
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
