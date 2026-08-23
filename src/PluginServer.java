@@ -11,19 +11,20 @@ import java.util.jar.JarEntry;
 /**
  * Mintropy MC Server - 纯Java高性能Minecraft服务器
  * 兼容 Minecraft 1.20.1
- * 加入 KeepAlive 和空区块发送，修复掉线问题
+ * 配置文件统一为 server.properties
+ * 核心JAR名称为 server.jar（构建时重命名）
  * 无正版验证，性能优先
  * 
- * @version 5.3.0
+ * @version 6.0.0
  */
 public class PluginServer {
 
-    // ==================== 服务器基本信息 ====================
+    // ==================== 服务器基本信息（固定，不读配置文件） ====================
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "5.3.0";
-    private static String MC_VERSION = "1.20.1";
-    private static int PROTOCOL_VERSION = 763;
-    private static int PORT = 25565;
+    private static String VERSION = "6.0.0";
+    private static String MC_VERSION = "1.20.1";          // 固定为1.20.1
+    private static int PROTOCOL_VERSION = 763;            // 1.20.1协议号
+    private static int PORT = 25565;                      // 默认端口，可被配置覆盖
     private static String SERVER_NAME = "Mintropy";
     private static int MAX_PLAYERS = 100;
     private static String MOTD = "Mintropy";
@@ -471,18 +472,17 @@ public class PluginServer {
         }
     }
 
-    // ==================== 加载配置 ====================
+    // ==================== 加载配置（标准 server.properties） ====================
     private static void loadConfig() {
-        File configFile = new File("Mintropyserver.properties");
+        File configFile = new File("server.properties");
         if (!configFile.exists()) {
-            logger.info("创建默认配置文件: Mintropyserver.properties");
+            logger.info("创建默认配置文件: server.properties");
             try (FileOutputStream output = new FileOutputStream(configFile)) {
                 Properties defaultConfig = new Properties();
                 defaultConfig.setProperty("server-name", "Mintropy");
                 defaultConfig.setProperty("server-port", "25565");
                 defaultConfig.setProperty("max-players", "100");
                 defaultConfig.setProperty("motd", "Mintropy");
-                defaultConfig.setProperty("mc-version", "1.20.1");
                 defaultConfig.setProperty("view-distance", "8");
                 defaultConfig.setProperty("simulation-distance", "8");
                 defaultConfig.setProperty("world-name", "MintropyWorld");
@@ -500,7 +500,6 @@ public class PluginServer {
             MAX_PLAYERS = Integer.parseInt(serverConfig.getProperty("max-players", "100"));
             MOTD = serverConfig.getProperty("motd", "Mintropy");
             if (MOTD.length() > 48) MOTD = MOTD.substring(0, 48);
-            MC_VERSION = serverConfig.getProperty("mc-version", "1.20.1");
             VIEW_DISTANCE = Integer.parseInt(serverConfig.getProperty("view-distance", "8"));
             SIMULATION_DISTANCE = Integer.parseInt(serverConfig.getProperty("simulation-distance", "8"));
             logger.info("配置文件加载完成");
@@ -660,7 +659,7 @@ public class PluginServer {
         sendJoinGame(output);
         sendPlayerPositionAndLook(output);
         sendPlayerAbilities(output);
-        sendChunkData(output); // 发送空区块，防止掉线
+        sendChunkData(output);
 
         logger.info("玩家 " + username + " 已加入游戏！");
         handleGamePackets(player);
@@ -719,53 +718,41 @@ public class PluginServer {
     private static void sendPlayerAbilities(DataOutputStream output) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x32); // Player Abilities
-        packet.writeByte(0x0F); // 标志：无敌、飞行、创造模式等
-        packet.writeFloat(0.05f); // 飞行速度
-        packet.writeFloat(0.1f);  // 视场角
+        writeVarInt(packet, 0x32);
+        packet.writeByte(0x0F);
+        packet.writeFloat(0.05f);
+        packet.writeFloat(0.1f);
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
         output.flush();
     }
 
-    // ==================== 发送空区块数据（简易） ====================
+    // ==================== 发送空区块数据 ====================
     private static void sendChunkData(DataOutputStream output) throws IOException {
-        // 发送一个空区块：坐标 (0,0)
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x22); // Chunk Data (1.20.1)
-        packet.writeInt(0); // chunk X
-        packet.writeInt(0); // chunk Z
+        writeVarInt(packet, 0x22);
+        packet.writeInt(0);
+        packet.writeInt(0);
 
-        // 高度图 NBT (空复合标签)
-        packet.writeByte(0x0A); // TAG_Compound
-        packet.writeShort(0);   // 空名称
-        packet.writeByte(0x00); // TAG_End
+        packet.writeByte(0x0A);
+        packet.writeShort(0);
+        packet.writeByte(0x00);
 
-        // 数据大小（占位，先写入0，之后修正）
         ByteArrayOutputStream chunkData = new ByteArrayOutputStream();
         DataOutputStream cd = new DataOutputStream(chunkData);
-
-        // 方块数据：使用全局调色板，但为了简化，发送全空气（状态ID=0）
-        // 1.20.1 区块格式： bits per entry = 4? 但空区块可以使用“单个调色板”？
-        // 这里采用最简方式：写入一个字节表示“单值调色板”，值=0（空气）
-        cd.writeByte(0); // bits per entry = 0 (表示单一值)
-        // 调色板长度
+        cd.writeByte(0);
         writeVarInt(cd, 1);
-        writeVarInt(cd, 0); // 空气状态ID
-        // 数据数组长度（VarInt，可能为0，因为所有方块相同）
         writeVarInt(cd, 0);
-        // 生物群系数据：同样简化，写入单一值
-        cd.writeByte(0); // bits per entry
+        writeVarInt(cd, 0);
+        cd.writeByte(0);
         writeVarInt(cd, 1);
-        writeVarInt(cd, 0); // 平原生物群系ID
+        writeVarInt(cd, 0);
         writeVarInt(cd, 0);
 
         byte[] chunkBytes = chunkData.toByteArray();
         writeVarInt(packet, chunkBytes.length);
         packet.write(chunkBytes);
-
-        // 方块实体数量
         writeVarInt(packet, 0);
 
         writeVarInt(output, buffer.size());
@@ -785,8 +772,7 @@ public class PluginServer {
                 int packetId = readVarInt(packet);
 
                 switch (packetId) {
-                    case 0x12: // Keep Alive (clientbound -> serverbound)
-                        // 忽略，客户端已收到
+                    case 0x12: // Keep Alive
                         break;
                     case 0x05: // Chat Message
                         String message = readString(packet, 100);
