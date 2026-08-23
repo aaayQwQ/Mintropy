@@ -11,16 +11,16 @@ import java.util.jar.JarEntry;
 /**
  * Mintropy MC Server - 纯Java高性能Minecraft服务器
  * 兼容 Minecraft 1.20.1
- * 完整实现配置阶段，修复客户端断开问题
+ * 完整实现配置阶段，使用最小注册表数据
  * 无正版验证，性能优先
  * 
- * @version 6.1.0
+ * @version 6.2.0
  */
 public class PluginServer {
 
     // ==================== 服务器基本信息 ====================
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "6.1.0";
+    private static String VERSION = "6.2.0";
     private static String MC_VERSION = "1.20.1";
     private static int PROTOCOL_VERSION = 763;
     private static int PORT = 25565;
@@ -656,6 +656,7 @@ public class PluginServer {
         packetLength = readVarInt(input);
         packetData = new byte[packetLength];
         input.readFully(packetData);
+        // 忽略内容
 
         // 发送配置阶段包
         sendRegistryData(output);
@@ -686,12 +687,8 @@ public class PluginServer {
         DataOutputStream packet = new DataOutputStream(buffer);
         writeVarInt(packet, 0x07); // Registry Data
 
-        // 这里需要一个真实的 Registry Data NBT。由于无法直接提供捕获的数据，
-        // 我们发送一个空的复合标签作为占位。实际使用时请替换为真实数据。
-        // 你可以从真实 1.20.1 服务器捕获，或参考 Minestom 的 Registry 实现。
-        packet.writeByte(0x0A); // TAG_Compound
-        packet.writeShort(0);   // 空名称
-        packet.writeByte(0x00); // TAG_End
+        // 构建最小注册表 NBT
+        writeRegistryNBT(packet);
 
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
@@ -715,6 +712,172 @@ public class PluginServer {
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
         output.flush();
+    }
+
+    // ==================== 注册表 NBT 构建 ====================
+    private static void writeRegistryNBT(DataOutputStream out) throws IOException {
+        // 根复合标签
+        writeNBTCompoundStart(out, "");
+
+        // --- dimension_type 注册表 ---
+        writeNBTString(out, "minecraft:dimension_type");
+        writeNBTListStart(out, "value", 10); // 复合标签列表
+
+        // 条目：minecraft:overworld
+        writeNBTCompoundStart(out, "");
+        writeNBTString(out, "name", "minecraft:overworld");
+        writeNBTInt(out, "id", 0);
+        writeNBTCompoundStart(out, "element");
+        writeNBTLong(out, "fixed_time", 6000L);
+        writeNBTBool(out, "has_skylight", true);
+        writeNBTBool(out, "has_ceiling", false);
+        writeNBTByte(out, "ultrawarm", (byte)0);
+        writeNBTByte(out, "natural", (byte)1);
+        writeNBTDouble(out, "coordinate_scale", 1.0);
+        writeNBTByte(out, "bed_works", (byte)1);
+        writeNBTByte(out, "respawn_anchor_works", (byte)0);
+        writeNBTInt(out, "min_y", -64);
+        writeNBTInt(out, "height", 384);
+        writeNBTInt(out, "logical_height", 384);
+        writeNBTString(out, "infiniburn", "#minecraft:infiniburn_overworld");
+        writeNBTString(out, "effects", "minecraft:overworld");
+        writeNBTByte(out, "ambient_light", (byte)0);
+        writeNBTByte(out, "piglin_safe", (byte)0);
+        writeNBTBool(out, "has_raids", true);
+        writeNBTInt(out, "monster_spawn_light_level", 0);
+        writeNBTInt(out, "monster_spawn_block_light_limit", 0);
+        writeNBTCompoundEnd(out);
+        writeNBTCompoundEnd(out);
+
+        // 结束 dimension_type 列表
+        writeNBTListEnd(out);
+
+        // --- worldgen/biome 注册表 ---
+        writeNBTString(out, "minecraft:worldgen/biome");
+        writeNBTListStart(out, "value", 10);
+
+        // 条目：minecraft:plains
+        writeNBTCompoundStart(out, "");
+        writeNBTString(out, "name", "minecraft:plains");
+        writeNBTInt(out, "id", 0);
+        writeNBTCompoundStart(out, "element");
+        writeNBTString(out, "precipitation", "rain");
+        writeNBTByte(out, "temperature", (byte)0);
+        writeNBTByte(out, "downfall", (byte)0);
+        writeNBTCompoundStart(out, "effects");
+        writeNBTInt(out, "sky_color", 7907327);
+        writeNBTInt(out, "water_fog_color", 329011);
+        writeNBTInt(out, "fog_color", 12638463);
+        writeNBTInt(out, "water_color", 4159204);
+        writeNBTCompoundEnd(out);
+        writeNBTCompoundEnd(out);
+        writeNBTCompoundEnd(out);
+
+        // 结束 worldgen/biome 列表
+        writeNBTListEnd(out);
+
+        // 根复合标签结束
+        writeNBTCompoundEnd(out);
+    }
+
+    // ==================== NBT 写入辅助方法 ====================
+    private static void writeNBTCompoundStart(DataOutputStream out, String name) throws IOException {
+        if (!name.isEmpty()) {
+            out.writeByte(0x0A); // TAG_Compound
+            writeNBTString(out, name);
+        } else {
+            out.writeByte(0x0A);
+        }
+    }
+
+    private static void writeNBTCompoundEnd(DataOutputStream out) throws IOException {
+        out.writeByte(0x00); // TAG_End
+    }
+
+    private static void writeNBTString(DataOutputStream out, String name) throws IOException {
+        out.writeByte(0x08); // TAG_String
+        writeNBTString(out, name);
+    }
+
+    private static void writeNBTString(DataOutputStream out, String name, String value) throws IOException {
+        out.writeByte(0x08);
+        writeNBTString(out, name);
+        writeNBTString(out, value);
+    }
+
+    private static void writeNBTStringValue(DataOutputStream out, String value) throws IOException {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        out.writeShort(bytes.length);
+        out.write(bytes);
+    }
+
+    private static void writeNBTInt(DataOutputStream out, String name, int value) throws IOException {
+        out.writeByte(0x03); // TAG_Int
+        writeNBTString(out, name);
+        out.writeInt(value);
+    }
+
+    private static void writeNBTLong(DataOutputStream out, String name, long value) throws IOException {
+        out.writeByte(0x04); // TAG_Long
+        writeNBTString(out, name);
+        out.writeLong(value);
+    }
+
+    private static void writeNBTBool(DataOutputStream out, String name, boolean value) throws IOException {
+        out.writeByte(0x01); // TAG_Byte
+        writeNBTString(out, name);
+        out.writeByte(value ? 1 : 0);
+    }
+
+    private static void writeNBTByte(DataOutputStream out, String name, byte value) throws IOException {
+        out.writeByte(0x01); // TAG_Byte
+        writeNBTString(out, name);
+        out.writeByte(value);
+    }
+
+    private static void writeNBTDouble(DataOutputStream out, String name, double value) throws IOException {
+        out.writeByte(0x06); // TAG_Double
+        writeNBTString(out, name);
+        out.writeDouble(value);
+    }
+
+    private static void writeNBTListStart(DataOutputStream out, String name, int elementType) throws IOException {
+        out.writeByte(0x09); // TAG_List
+        writeNBTString(out, name);
+        out.writeByte(elementType);
+        out.writeInt(0); // 长度占位，稍后回填？为简单起见，直接写入0（表示空列表），但我们需要实际长度。
+        // 注意：这里需要回填列表长度。简化处理：我们预先知道条目数量，可以在循环前写入实际数量。
+    }
+
+    // 修正：列表长度需要在实际写入元素前写入正确数量
+    // 由于我们只写入一个元素，可以改为直接使用 writeNBTListStart 后写入元素，再手动回填长度比较复杂。
+    // 为简化，我们使用 ByteArrayOutputStream 构建列表内容，然后写入长度和内容。
+    // 但为了代码简洁，我们假设每个列表只有一个元素，直接在 writeNBTListStart 中写入长度1。
+    // 所以需要单独定义方法 writeNBTListStartWithCount。
+
+    private static void writeNBTListStartWithCount(DataOutputStream out, String name, int elementType, int count) throws IOException {
+        out.writeByte(0x09);
+        writeNBTString(out, name);
+        out.writeByte(elementType);
+        out.writeInt(count);
+    }
+
+    // 为方便，重载：
+    private static void writeNBTListStart(DataOutputStream out, String name, int elementType) throws IOException {
+        // 默认长度1
+        writeNBTListStartWithCount(out, name, elementType, 1);
+    }
+
+    private static void writeNBTListEnd(DataOutputStream out) throws IOException {
+        // 列表不需要显式结束，只要长度正确即可
+        // 但为了结构清晰，什么也不做
+    }
+
+    // 字符串写入（不带标签）
+    private static void writeNBTString(DataOutputStream out, String value) throws IOException {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        out.writeShort(bytes.length);
+        out.write(bytes);
     }
 
     // ==================== 发送加入游戏包 ====================
