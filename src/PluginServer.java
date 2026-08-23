@@ -8,8 +8,9 @@ import java.util.logging.*;
 /**
  * PluginServer - 插件化服务器
  * 支持动态加载JAR插件，提供简单的API接口
+ * 优化：适配Docker容器环境，主线程保持运行
  * 
- * @version 1.0.0
+ * @version 1.0.1
  */
 public class PluginServer {
     private static final Logger logger = Logger.getLogger("PluginServer");
@@ -19,7 +20,7 @@ public class PluginServer {
     private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
     private static volatile boolean running = false;
     private static ServerAPI serverAPI;
-    private static final String VERSION = "1.0.0";
+    private static final String VERSION = "1.0.1";
 
     // ============ 插件接口 ============
     public interface Plugin {
@@ -100,6 +101,21 @@ public class PluginServer {
                 stop();
             }
         }));
+        
+        // 主线程保持运行，处理控制台输入
+        try (Scanner scanner = new Scanner(System.in)) {
+            while (running && scanner.hasNextLine()) {
+                System.out.print("> ");
+                System.out.flush();
+                String input = scanner.nextLine().trim();
+                if (!input.isEmpty()) {
+                    handleCommand(input);
+                }
+            }
+        } catch (Exception e) {
+            logger.severe("控制台输入错误: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
     // ============ 打印横幅 ============
@@ -108,6 +124,7 @@ public class PluginServer {
         System.out.println("   Mintropy Server v" + VERSION);
         System.out.println("   插件化服务器");
         System.out.println("=================================");
+        System.out.flush();
     }
 
     // ============ 启动服务器 ============
@@ -124,9 +141,8 @@ public class PluginServer {
         
         logger.info("插件服务器启动完成！");
         logger.info("输入 'help' 查看可用命令");
-        
-        // 启动控制台输入
-        startConsoleInput();
+        System.out.print("> ");
+        System.out.flush();
     }
 
     // ============ 停止服务器 ============
@@ -140,6 +156,14 @@ public class PluginServer {
         
         // 关闭调度器
         scheduler.shutdown();
+        try {
+            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            scheduler.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
         
         // 关闭类加载器
         classLoaders.values().forEach(loader -> {
@@ -193,8 +217,25 @@ public class PluginServer {
                 PluginServer.class.getClassLoader()
             );
             
+            // 检查是否是Bukkit插件
+            try {
+                classLoader.loadClass("org.bukkit.plugin.java.JavaPlugin");
+                logger.warning("跳过Bukkit插件: " + jarFile.getName() + " (需要Bukkit服务器)");
+                classLoader.close();
+                return;
+            } catch (ClassNotFoundException e) {
+                // 不是Bukkit插件，继续加载
+            }
+            
             // 加载插件主类
-            Class<?> pluginClass = classLoader.loadClass(config.mainClass);
+            Class<?> pluginClass;
+            try {
+                pluginClass = classLoader.loadClass(config.mainClass);
+            } catch (ClassNotFoundException e) {
+                logger.warning("找不到插件主类: " + config.mainClass + " in " + jarFile.getName());
+                classLoader.close();
+                return;
+            }
             
             // 验证是否实现了Plugin接口
             if (!Plugin.class.isAssignableFrom(pluginClass)) {
@@ -204,7 +245,14 @@ public class PluginServer {
             }
             
             // 实例化插件
-            Plugin plugin = (Plugin) pluginClass.getDeclaredConstructor().newInstance();
+            Plugin plugin;
+            try {
+                plugin = (Plugin) pluginClass.getDeclaredConstructor().newInstance();
+            } catch (Exception e) {
+                logger.warning("无法实例化插件: " + config.mainClass + " - " + e.getMessage());
+                classLoader.close();
+                return;
+            }
             
             // 注入服务器API
             injectServerAPI(plugin, serverAPI);
@@ -303,24 +351,6 @@ public class PluginServer {
         plugins.clear();
     }
 
-    // ============ 启动控制台输入 ============
-    private static void startConsoleInput() {
-        Thread consoleThread = new Thread(() -> {
-            Scanner scanner = new Scanner(System.in);
-            while (running) {
-                System.out.print("> ");
-                String input = scanner.nextLine().trim();
-                if (!input.isEmpty()) {
-                    handleCommand(input);
-                }
-            }
-            scanner.close();
-        });
-        consoleThread.setDaemon(true);
-        consoleThread.setName("ConsoleInput");
-        consoleThread.start();
-    }
-
     // ============ 处理控制台命令 ============
     private static void handleCommand(String input) {
         String[] parts = input.split("\\s+");
@@ -410,5 +440,6 @@ public class PluginServer {
             );
         }
         System.out.println("=============================\n");
+        System.out.flush();
     }
 }
