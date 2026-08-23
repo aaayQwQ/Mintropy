@@ -659,7 +659,7 @@ public class PluginServer {
         sendJoinGame(output);
         sendPlayerPositionAndLook(output);
         sendPlayerAbilities(output);
-        sendChunkData(output);
+        //sendChunkData(output);
 
         logger.info("玩家 " + username + " 已加入游戏！");
         handleGamePackets(player);
