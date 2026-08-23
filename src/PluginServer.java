@@ -10,14 +10,13 @@ import java.util.jar.JarEntry;
 
 /**
  * Mintropy MC Server - 纯Java高性能Minecraft服务器
- * UTF-8无BOM编码
- * 彻底修复字符串长度问题
+ * 修复数据包格式问题
  * 
- * @version 4.3.0
+ * @version 4.4.0
  */
 public class PluginServer {
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "4.3.0";
+    private static String VERSION = "4.4.0";
     private static String MC_VERSION = "1.20.4";
     private static int PROTOCOL_VERSION = 765;
     private static int PORT = 25565;
@@ -657,7 +656,6 @@ public class PluginServer {
         }
         
         String username = readString(packet, 16);
-        // 使用固定短UUID
         String playerUUID = "00000000-0000-0000-0000-000000000001";
         
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
@@ -677,7 +675,6 @@ public class PluginServer {
         sendPlayerPositionAndLook(output);
         
         logger.info("玩家 " + username + " 已加入游戏！");
-        serverAPI.broadcastMessage("§e" + username + " §a加入了服务器");
         
         handleGamePackets(player);
     }
@@ -687,24 +684,24 @@ public class PluginServer {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
         
-        writeVarInt(packet, 0x2B);
-        packet.writeInt(0);
-        packet.writeBoolean(false);
-        packet.writeByte(1);
-        packet.writeByte(-1);
-        writeVarInt(packet, 1);
-        writeString(packet, "minecraft:overworld");
-        writeString(packet, "minecraft:overworld");
-        writeString(packet, "world");
-        packet.writeLong(0);
-        packet.writeByte(MAX_PLAYERS);
-        writeVarInt(packet, VIEW_DISTANCE);
-        writeVarInt(packet, SIMULATION_DISTANCE);
-        packet.writeBoolean(false);
-        packet.writeBoolean(true);
-        packet.writeBoolean(false);
-        packet.writeBoolean(false);
-        packet.writeBoolean(false);
+        writeVarInt(packet, 0x2B); // Join Game
+        packet.writeInt(0); // Entity ID
+        packet.writeBoolean(false); // Is hardcore
+        packet.writeByte(1); // Gamemode (Creative)
+        packet.writeByte(-1); // Previous gamemode
+        writeVarInt(packet, 1); // Dimension count
+        writeString(packet, "minecraft:overworld"); // Dimension name
+        writeString(packet, "minecraft:overworld"); // Dimension type
+        writeString(packet, "world"); // World name
+        packet.writeLong(0); // Hashed seed
+        packet.writeByte(MAX_PLAYERS); // Max players
+        writeVarInt(packet, VIEW_DISTANCE); // View distance
+        writeVarInt(packet, SIMULATION_DISTANCE); // Simulation distance
+        packet.writeBoolean(false); // Reduced debug info
+        packet.writeBoolean(true); // Enable respawn screen
+        packet.writeBoolean(false); // Is debug
+        packet.writeBoolean(false); // Is flat
+        packet.writeBoolean(false); // Has death location
         
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
@@ -716,14 +713,14 @@ public class PluginServer {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
         
-        writeVarInt(packet, 0x3E);
-        packet.writeDouble(0);
-        packet.writeDouble(65);
-        packet.writeDouble(0);
-        packet.writeFloat(0);
-        packet.writeFloat(0);
-        packet.writeByte(0);
-        writeVarInt(packet, 0);
+        writeVarInt(packet, 0x3E); // Synchronize Player Position
+        packet.writeDouble(0); // X
+        packet.writeDouble(65); // Y
+        packet.writeDouble(0); // Z
+        packet.writeFloat(0); // Yaw
+        packet.writeFloat(0); // Pitch
+        packet.writeByte(0); // Flags
+        writeVarInt(packet, 0); // Teleport ID
         
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
@@ -786,7 +783,6 @@ public class PluginServer {
         } catch (IOException e) {
             onlinePlayers.remove(player.getUsername());
             logger.info("玩家 " + player.getUsername() + " 断开连接");
-            serverAPI.broadcastMessage("§e" + player.getUsername() + " §c离开了服务器");
         }
     }
 
