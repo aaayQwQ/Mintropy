@@ -10,20 +10,21 @@ import java.util.jar.JarEntry;
 
 /**
  * Mintropy MC Server - 纯Java高性能Minecraft服务器
+ * UTF-8无BOM编码
  * 支持地形生成、玩家装备、建筑系统
  * 无验证，性能优先
  * 
- * @version 4.0.0
+ * @version 4.1.0
  */
 public class PluginServer {
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "4.0.0";
+    private static String VERSION = "4.1.0";
     private static String MC_VERSION = "1.20.4";
     private static int PROTOCOL_VERSION = 765;
     private static int PORT = 25565;
-    private static String SERVER_NAME = "Mintropy Server";
+    private static String SERVER_NAME = "Mintropy";
     private static int MAX_PLAYERS = 100;
-    private static String MOTD = "§a§lMintropy Server §r§7- 高性能MC服务器";
+    private static String MOTD = "Mintropy Server";
     private static int VIEW_DISTANCE = 8;
     private static int SIMULATION_DISTANCE = 8;
     
@@ -38,7 +39,6 @@ public class PluginServer {
     private static volatile boolean running = false;
     private static Properties serverConfig = new Properties();
     
-    // 世界数据
     private static World world;
     private static File worldFolder;
 
@@ -64,7 +64,7 @@ public class PluginServer {
             File chunkFile = new File(worldFolder, "chunk_" + chunkX + "_" + chunkZ + ".dat");
             
             if (chunkFile.exists()) {
-                return loadChunk(chunkFile);
+                return loadChunk(chunkFile, chunkX, chunkZ);
             } else {
                 return generateChunk(chunkX, chunkZ, chunkFile);
             }
@@ -73,50 +73,44 @@ public class PluginServer {
         private Chunk generateChunk(int chunkX, int chunkZ, File file) {
             Chunk chunk = new Chunk(chunkX, chunkZ);
             
-            // 生成地形
             for (int x = 0; x < 16; x++) {
                 for (int z = 0; z < 16; z++) {
                     int worldX = chunkX * 16 + x;
                     int worldZ = chunkZ * 16 + z;
                     
-                    // 简单地形生成
                     int height = 64 + (int)(Math.sin(worldX * 0.1) * Math.cos(worldZ * 0.1) * 5);
                     
                     for (int y = 0; y <= height; y++) {
                         String blockType;
                         if (y == height) {
-                            blockType = "minecraft:grass_block";
+                            blockType = "grass_block";
                         } else if (y > height - 3) {
-                            blockType = "minecraft:dirt";
+                            blockType = "dirt";
                         } else {
-                            blockType = "minecraft:stone";
+                            blockType = "stone";
                         }
                         chunk.setBlock(x, y, z, blockType);
                     }
                     
-                    // 生成树
                     if (random.nextInt(100) < 5 && height > 64) {
                         generateTree(chunk, x, height + 1, z);
                     }
                 }
             }
             
-            // 保存区块
             saveChunk(chunk, file);
             return chunk;
         }
         
         private void generateTree(Chunk chunk, int x, int y, int z) {
-            // 树干
             for (int i = 0; i < 4; i++) {
-                chunk.setBlock(x, y + i, z, "minecraft:oak_log");
+                chunk.setBlock(x, y + i, z, "oak_log");
             }
-            // 树叶
             for (int dx = -2; dx <= 2; dx++) {
                 for (int dz = -2; dz <= 2; dz++) {
                     for (int dy = 2; dy <= 4; dy++) {
                         if (Math.abs(dx) + Math.abs(dz) + Math.abs(dy - 3) <= 3) {
-                            chunk.setBlock(x + dx, y + dy, z + dz, "minecraft:oak_leaves");
+                            chunk.setBlock(x + dx, y + dy, z + dz, "oak_leaves");
                         }
                     }
                 }
@@ -131,8 +125,8 @@ public class PluginServer {
             }
         }
         
-        private Chunk loadChunk(File file) {
-            Chunk chunk = new Chunk(0, 0);
+        private Chunk loadChunk(File file, int chunkX, int chunkZ) {
+            Chunk chunk = new Chunk(chunkX, chunkZ);
             try (DataInputStream input = new DataInputStream(new FileInputStream(file))) {
                 chunk.load(input);
             } catch (IOException e) {
@@ -146,6 +140,7 @@ public class PluginServer {
                 File chunkFile = new File(worldFolder, "chunk_" + chunk.chunkX + "_" + chunk.chunkZ + ".dat");
                 saveChunk(chunk, chunkFile);
             });
+            logger.info("世界保存完成: " + chunks.size() + " 个区块");
         }
     }
 
@@ -183,7 +178,9 @@ public class PluginServer {
                         String block = blocks[x][y][z];
                         if (block != null) {
                             output.writeBoolean(true);
-                            output.writeUTF(block);
+                            byte[] bytes = block.getBytes(StandardCharsets.UTF_8);
+                            output.writeInt(bytes.length);
+                            output.write(bytes);
                         } else {
                             output.writeBoolean(false);
                         }
@@ -193,14 +190,17 @@ public class PluginServer {
         }
         
         public void load(DataInputStream input) throws IOException {
-            input.readInt(); // chunkX
-            input.readInt(); // chunkZ
+            input.readInt();
+            input.readInt();
             
             for (int x = 0; x < 16; x++) {
                 for (int y = 0; y < 256; y++) {
                     for (int z = 0; z < 16; z++) {
                         if (input.readBoolean()) {
-                            blocks[x][y][z] = input.readUTF();
+                            int length = input.readInt();
+                            byte[] bytes = new byte[length];
+                            input.readFully(bytes);
+                            blocks[x][y][z] = new String(bytes, StandardCharsets.UTF_8);
                         }
                     }
                 }
@@ -215,20 +215,15 @@ public class PluginServer {
         private final Socket socket;
         private final DataInputStream input;
         private final DataOutputStream output;
-        private double x = 0, y = 64, z = 0;
+        private double x = 0, y = 65, z = 0;
         private float yaw = 0, pitch = 0;
         private boolean onGround = true;
         
-        // 装备栏
-        private final String[] equipment = new String[6]; // 0=主手,1=副手,2=头盔,3=胸甲,4=护腿,5=靴子
-        // 背包
+        private final String[] equipment = new String[6];
         private final String[] inventory = new String[36];
-        // 生命值
         private float health = 20.0f;
         private float maxHealth = 20.0f;
-        // 饥饿值
         private int foodLevel = 20;
-        // 经验
         private int experience = 0;
         private int level = 0;
         
@@ -255,6 +250,10 @@ public class PluginServer {
         
         public void sendMessage(String message) {
             try {
+                if (message.length() > 256) {
+                    message = message.substring(0, 256);
+                }
+                
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                 DataOutputStream packet = new DataOutputStream(buffer);
                 
@@ -264,66 +263,19 @@ public class PluginServer {
                 
                 sendPacket(buffer.toByteArray());
             } catch (IOException e) {
-                logger.warning("发送消息失败: " + e.getMessage());
+                // 忽略
             }
         }
         
         public void setEquipment(int slot, String item) {
             if (slot >= 0 && slot < equipment.length) {
                 equipment[slot] = item;
-                sendEquipmentUpdate(slot, item);
             }
         }
         
         public void setInventoryItem(int slot, String item) {
             if (slot >= 0 && slot < inventory.length) {
                 inventory[slot] = item;
-                sendInventoryUpdate(slot, item);
-            }
-        }
-        
-        private void sendEquipmentUpdate(int slot, String item) {
-            try {
-                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                DataOutputStream packet = new DataOutputStream(buffer);
-                
-                writeVarInt(packet, 0x5B); // Set Equipment
-                writeVarInt(packet, 0); // Entity ID (self)
-                writeVarInt(packet, slot);
-                writeItemStack(packet, item);
-                
-                sendPacket(buffer.toByteArray());
-            } catch (IOException e) {
-                logger.warning("发送装备更新失败: " + e.getMessage());
-            }
-        }
-        
-        private void sendInventoryUpdate(int slot, String item) {
-            try {
-                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                DataOutputStream packet = new DataOutputStream(buffer);
-                
-                writeVarInt(packet, 0x14); // Set Container Slot
-                packet.writeByte(0); // Window ID
-                writeVarInt(packet, 0); // State ID
-                packet.writeShort(slot);
-                writeItemStack(packet, item);
-                
-                sendPacket(buffer.toByteArray());
-            } catch (IOException e) {
-                logger.warning("发送背包更新失败: " + e.getMessage());
-            }
-        }
-        
-        private void writeItemStack(DataOutputStream packet, String item) throws IOException {
-            if (item == null || item.isEmpty()) {
-                packet.writeBoolean(false); // No item
-            } else {
-                packet.writeBoolean(true); // Has item
-                writeVarInt(packet, 1); // Item ID (diamond sword = 1 for simplicity)
-                packet.writeByte(1); // Count
-                // No NBT data
-                packet.writeByte(0); // End of NBT
             }
         }
         
@@ -343,7 +295,7 @@ public class PluginServer {
                 
                 sendPacket(buffer.toByteArray());
             } catch (IOException e) {
-                logger.warning("发送位置失败: " + e.getMessage());
+                // 忽略
             }
         }
         
@@ -357,6 +309,10 @@ public class PluginServer {
         
         public void disconnect(String reason) {
             try {
+                if (reason.length() > 100) {
+                    reason = reason.substring(0, 100);
+                }
+                
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                 DataOutputStream packet = new DataOutputStream(buffer);
                 writeVarInt(packet, 0x1B);
@@ -410,8 +366,12 @@ public class PluginServer {
 
         @Override
         public void broadcastMessage(String message) {
-            onlinePlayers.values().forEach(player -> player.sendMessage(message));
-            logger.info("[广播] " + message);
+            if (message.length() > 256) {
+                message = message.substring(0, 256);
+            }
+            final String msg = message;
+            onlinePlayers.values().forEach(player -> player.sendMessage(msg));
+            logger.info("[广播] " + msg);
         }
 
         @Override
@@ -474,31 +434,23 @@ public class PluginServer {
     public static void main(String[] args) {
         printBanner();
         
-        // 加载配置
         loadConfig();
-        
-        // 加载世界
         loadWorld();
         
-        // 初始化服务器API
         serverAPI = new ServerAPIImpl();
         
-        // 加载插件
         loadPlugins("plugins");
         enableAllPlugins();
         
-        // 启动MC服务器
         startMCServer();
         
-        // 添加关闭钩子
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (running) {
                 stop();
             }
         }));
         
-        // 主线程处理控制台输入
-        try (Scanner scanner = new Scanner(System.in)) {
+        try (Scanner scanner = new Scanner(System.in, "UTF-8")) {
             while (running && scanner.hasNextLine()) {
                 System.out.print("> ");
                 System.out.flush();
@@ -520,13 +472,13 @@ public class PluginServer {
             logger.info("创建默认配置文件: Mintropyserver.properties");
             try (FileOutputStream output = new FileOutputStream(configFile)) {
                 Properties defaultConfig = new Properties();
-                defaultConfig.setProperty("server-name", SERVER_NAME);
-                defaultConfig.setProperty("server-port", String.valueOf(PORT));
-                defaultConfig.setProperty("max-players", String.valueOf(MAX_PLAYERS));
-                defaultConfig.setProperty("motd", MOTD);
-                defaultConfig.setProperty("mc-version", MC_VERSION);
-                defaultConfig.setProperty("view-distance", String.valueOf(VIEW_DISTANCE));
-                defaultConfig.setProperty("simulation-distance", String.valueOf(SIMULATION_DISTANCE));
+                defaultConfig.setProperty("server-name", "Mintropy");
+                defaultConfig.setProperty("server-port", "25565");
+                defaultConfig.setProperty("max-players", "100");
+                defaultConfig.setProperty("motd", "Mintropy Server");
+                defaultConfig.setProperty("mc-version", "1.20.4");
+                defaultConfig.setProperty("view-distance", "8");
+                defaultConfig.setProperty("simulation-distance", "8");
                 defaultConfig.setProperty("world-name", "MintropyWorld");
                 defaultConfig.store(output, "Mintropy Server Configuration");
             } catch (IOException e) {
@@ -538,15 +490,15 @@ public class PluginServer {
         try (FileInputStream input = new FileInputStream(configFile)) {
             serverConfig.load(input);
             
-            SERVER_NAME = serverConfig.getProperty("server-name", SERVER_NAME);
-            PORT = Integer.parseInt(serverConfig.getProperty("server-port", String.valueOf(PORT)));
-            MAX_PLAYERS = Integer.parseInt(serverConfig.getProperty("max-players", String.valueOf(MAX_PLAYERS)));
-            MOTD = serverConfig.getProperty("motd", MOTD);
-            MC_VERSION = serverConfig.getProperty("mc-version", MC_VERSION);
-            VIEW_DISTANCE = Integer.parseInt(serverConfig.getProperty("view-distance", String.valueOf(VIEW_DISTANCE)));
-            SIMULATION_DISTANCE = Integer.parseInt(serverConfig.getProperty("simulation-distance", String.valueOf(SIMULATION_DISTANCE)));
+            SERVER_NAME = serverConfig.getProperty("server-name", "Mintropy");
+            PORT = Integer.parseInt(serverConfig.getProperty("server-port", "25565"));
+            MAX_PLAYERS = Integer.parseInt(serverConfig.getProperty("max-players", "100"));
+            MOTD = serverConfig.getProperty("motd", "Mintropy Server");
+            MC_VERSION = serverConfig.getProperty("mc-version", "1.20.4");
+            VIEW_DISTANCE = Integer.parseInt(serverConfig.getProperty("view-distance", "8"));
+            SIMULATION_DISTANCE = Integer.parseInt(serverConfig.getProperty("simulation-distance", "8"));
             
-            logger.info("配置文件加载完成: " + configFile.getAbsolutePath());
+            logger.info("配置文件加载完成");
             logger.info("服务器名称: " + SERVER_NAME);
             logger.info("端口: " + PORT);
             logger.info("最大玩家数: " + MAX_PLAYERS);
@@ -570,7 +522,6 @@ public class PluginServer {
         
         world = new World(worldName, worldFolder);
         
-        // 预生成出生点附近区块
         logger.info("预生成出生点区块...");
         for (int dx = -2; dx <= 2; dx++) {
             for (int dz = -2; dz <= 2; dz++) {
@@ -634,7 +585,7 @@ public class PluginServer {
                 }
                 
                 int protocolVersion = readVarInt(packet);
-                String serverAddress = readString(packet);
+                String serverAddress = readString(packet, 255);
                 int serverPort = packet.readUnsignedShort();
                 int nextState = readVarInt(packet);
                 
@@ -662,9 +613,11 @@ public class PluginServer {
         byte[] packetData = new byte[packetLength];
         input.readFully(packetData);
         
+        String safeMotd = MOTD.length() > 48 ? MOTD.substring(0, 48) : MOTD;
+        
         String statusJson = "{\"version\":{\"name\":\"" + MC_VERSION + "\",\"protocol\":" + PROTOCOL_VERSION + "}," +
                            "\"players\":{\"max\":" + MAX_PLAYERS + ",\"online\":" + onlinePlayers.size() + "}," +
-                           "\"description\":{\"text\":\"" + MOTD + "\"}}";
+                           "\"description\":{\"text\":\"" + safeMotd + "\"}}";
         
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
@@ -703,7 +656,7 @@ public class PluginServer {
             return;
         }
         
-        String username = readString(packet);
+        String username = readString(packet, 16);
         UUID playerUUID = UUID.randomUUID();
         
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
@@ -790,25 +743,25 @@ public class PluginServer {
                 int packetId = readVarInt(packet);
                 
                 switch (packetId) {
-                    case 0x05: // Chat Message
-                        String message = readString(packet);
+                    case 0x05:
+                        String message = readString(packet, 256);
                         handlePlayerChat(player, message);
                         break;
                         
-                    case 0x1A: // Player Position
+                    case 0x1A:
                         player.x = packet.readDouble();
                         player.y = packet.readDouble();
                         player.z = packet.readDouble();
                         player.onGround = packet.readBoolean();
                         break;
                         
-                    case 0x1B: // Player Rotation
+                    case 0x1B:
                         player.yaw = packet.readFloat();
                         player.pitch = packet.readFloat();
                         player.onGround = packet.readBoolean();
                         break;
                         
-                    case 0x1C: // Player Position and Rotation
+                    case 0x1C:
                         player.x = packet.readDouble();
                         player.y = packet.readDouble();
                         player.z = packet.readDouble();
@@ -817,7 +770,7 @@ public class PluginServer {
                         player.onGround = packet.readBoolean();
                         break;
                         
-                    case 0x1D: // Player Action (挖掘方块等)
+                    case 0x1D:
                         int action = readVarInt(packet);
                         int blockX = packet.readInt();
                         int blockY = packet.readInt();
@@ -839,18 +792,12 @@ public class PluginServer {
     // ============ 处理方块操作 ============
     private static void handleBlockAction(MCPlayer player, int action, int x, int y, int z) {
         switch (action) {
-            case 0: // 开始挖掘
-                // 移除方块
-                serverAPI.setBlock(x, y, z, "minecraft:air");
+            case 0:
+            case 2:
+                serverAPI.setBlock(x, y, z, "air");
                 break;
-            case 1: // 取消挖掘
-                break;
-            case 2: // 完成挖掘
-                serverAPI.setBlock(x, y, z, "minecraft:air");
-                break;
-            case 3: // 放置方块
-                // 简化处理，在点击位置放置石头
-                serverAPI.setBlock(x, y + 1, z, "minecraft:stone");
+            case 3:
+                serverAPI.setBlock(x, y + 1, z, "stone");
                 break;
         }
     }
@@ -877,7 +824,7 @@ public class PluginServer {
             try {
                 executor.onCommand(player, args);
             } catch (Exception e) {
-                player.sendMessage("§c命令执行错误: " + e.getMessage());
+                player.sendMessage("§c命令执行错误");
             }
             return;
         }
@@ -957,7 +904,6 @@ public class PluginServer {
                 
             case "save":
                 world.saveAll();
-                logger.info("世界已保存");
                 break;
                 
             default:
@@ -1107,13 +1053,11 @@ public class PluginServer {
         
         disableAllPlugins();
         
-        // 保存世界
         world.saveAll();
-        logger.info("世界已保存");
         
         scheduler.shutdown();
         
-        onlinePlayers.values().forEach(player -> player.disconnect("§c服务器关闭"));
+        onlinePlayers.values().forEach(player -> player.disconnect("服务器关闭"));
         onlinePlayers.clear();
         
         try {
@@ -1157,8 +1101,11 @@ public class PluginServer {
         } while (value != 0);
     }
 
-    private static String readString(DataInputStream input) throws IOException {
+    private static String readString(DataInputStream input, int maxLength) throws IOException {
         int length = readVarInt(input);
+        if (length > maxLength) {
+            throw new IOException("String too long: " + length + " > " + maxLength);
+        }
         byte[] bytes = new byte[length];
         input.readFully(bytes);
         return new String(bytes, StandardCharsets.UTF_8);
