@@ -1044,4 +1044,176 @@ public class PluginServer {
                 
                 String name = props.getProperty("name");
                 String version = props.getProperty("version");
-                String
+                String main = props.getProperty("main");
+                
+                if (name == null || version == null || main == null) return null;
+                
+                return new PluginConfig(name, version, main);
+            }
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    // ============ 注入服务器API ============
+    private static void injectServerAPI(Plugin plugin, ServerAPI api) {
+        try {
+            Arrays.stream(plugin.getClass().getMethods())
+                .filter(method -> method.getName().equals("setServerAPI"))
+                .filter(method -> method.getParameterCount() == 1)
+                .filter(method -> method.getParameterTypes()[0].isAssignableFrom(ServerAPI.class))
+                .findFirst()
+                .ifPresent(method -> {
+                    try {
+                        method.invoke(plugin, api);
+                    } catch (Exception e) {
+                        // 忽略
+                    }
+                });
+        } catch (Exception e) {
+            // 忽略
+        }
+    }
+
+    // ============ 启用所有插件 ============
+    public static void enableAllPlugins() {
+        plugins.forEach((name, plugin) -> {
+            try {
+                plugin.onEnable();
+                logger.info("✓ 启用插件: " + plugin.getName());
+            } catch (Exception e) {
+                logger.severe("✗ 启用插件失败: " + plugin.getName());
+            }
+        });
+    }
+
+    // ============ 禁用所有插件 ============
+    public static void disableAllPlugins() {
+        plugins.forEach((name, plugin) -> {
+            try {
+                plugin.onDisable();
+            } catch (Exception e) {
+                // 忽略
+            }
+        });
+        plugins.clear();
+    }
+
+    // ============ 停止服务器 ============
+    public static void stop() {
+        if (!running) return;
+        logger.info("正在关闭服务器...");
+        running = false;
+        
+        disableAllPlugins();
+        
+        // 保存世界
+        world.saveAll();
+        logger.info("世界已保存");
+        
+        scheduler.shutdown();
+        
+        onlinePlayers.values().forEach(player -> player.disconnect("§c服务器关闭"));
+        onlinePlayers.clear();
+        
+        try {
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                serverSocket.close();
+            }
+        } catch (IOException e) {
+            // 忽略
+        }
+        
+        logger.info("服务器已关闭");
+    }
+
+    // ============ 工具方法 ============
+    private static int readVarInt(DataInputStream input) throws IOException {
+        int result = 0;
+        int position = 0;
+        byte currentByte;
+        
+        do {
+            currentByte = input.readByte();
+            result |= (currentByte & 0x7F) << position;
+            position += 7;
+            
+            if (position >= 32) {
+                throw new IOException("VarInt too big");
+            }
+        } while ((currentByte & 0x80) != 0);
+        
+        return result;
+    }
+
+    private static void writeVarInt(DataOutputStream output, int value) throws IOException {
+        do {
+            byte temp = (byte) (value & 0x7F);
+            value >>>= 7;
+            if (value != 0) {
+                temp |= 0x80;
+            }
+            output.writeByte(temp);
+        } while (value != 0);
+    }
+
+    private static String readString(DataInputStream input) throws IOException {
+        int length = readVarInt(input);
+        byte[] bytes = new byte[length];
+        input.readFully(bytes);
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private static void writeString(DataOutputStream output, String string) throws IOException {
+        byte[] bytes = string.getBytes(StandardCharsets.UTF_8);
+        writeVarInt(output, bytes.length);
+        output.write(bytes);
+    }
+
+    // ============ 列出所有插件 ============
+    private static void listPlugins() {
+        if (plugins.isEmpty()) {
+            logger.info("当前没有加载任何插件");
+            return;
+        }
+        
+        logger.info("已加载的插件 (" + plugins.size() + "):");
+        plugins.values().forEach(plugin -> 
+            logger.info("  • " + plugin.getName() + " v" + plugin.getVersion())
+        );
+    }
+
+    // ============ 重新加载插件 ============
+    private static void reloadPlugins() {
+        disableAllPlugins();
+        plugins.clear();
+        commands.clear();
+        loadPlugins("plugins");
+        enableAllPlugins();
+    }
+
+    // ============ 打印横幅 ============
+    private static void printBanner() {
+        System.out.println("=================================");
+        System.out.println("   Mintropy MC Server v" + VERSION);
+        System.out.println("   高性能Minecraft服务器");
+        System.out.println("   MC版本: " + MC_VERSION);
+        System.out.println("=================================");
+        System.out.flush();
+    }
+
+    // ============ 显示帮助 ============
+    private static void showHelp() {
+        System.out.println("\n========== 控制台命令 ==========");
+        System.out.println("  stop       - 停止服务器");
+        System.out.println("  plugins    - 列出所有插件");
+        System.out.println("  reload     - 重新加载插件");
+        System.out.println("  players    - 列出在线玩家");
+        System.out.println("  broadcast  - 广播消息");
+        System.out.println("  save       - 保存世界");
+        System.out.println("  version    - 显示版本信息");
+        System.out.println("  help       - 显示此帮助");
+        System.out.println("================================\n");
+        System.out.flush();
+    }
+}
