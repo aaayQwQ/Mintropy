@@ -4,51 +4,244 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.logging.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
 import java.util.jar.JarFile;
 import java.util.jar.JarEntry;
 
-
 /**
- * Mintropy MC Server - 纯Java实现的Minecraft服务器
- * 完全独立，无第三方依赖
- * 支持MC客户端连接和插件扩展
+ * Mintropy MC Server - 纯Java高性能Minecraft服务器
+ * 支持地形生成、玩家装备、建筑系统
+ * 无验证，性能优先
  * 
- * @version 3.0.0
+ * @version 4.0.0
  */
 public class PluginServer {
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static final String VERSION = "3.0.0";
-    private static final String MC_VERSION = "1.20.4";
-    private static final int PROTOCOL_VERSION = 765;
-    private static final int PORT = 25565;
+    private static String VERSION = "4.0.0";
+    private static String MC_VERSION = "1.20.4";
+    private static int PROTOCOL_VERSION = 765;
+    private static int PORT = 25565;
+    private static String SERVER_NAME = "Mintropy Server";
+    private static int MAX_PLAYERS = 100;
+    private static String MOTD = "§a§lMintropy Server §r§7- 高性能MC服务器";
+    private static int VIEW_DISTANCE = 8;
+    private static int SIMULATION_DISTANCE = 8;
     
     private static final Map<String, Plugin> plugins = new ConcurrentHashMap<>();
     private static final Map<String, PluginClassLoader> classLoaders = new ConcurrentHashMap<>();
     private static final Map<String, CommandExecutor> commands = new ConcurrentHashMap<>();
     private static final Map<String, MCPlayer> onlinePlayers = new ConcurrentHashMap<>();
-    private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
+    private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(8);
     
     private static ServerSocket serverSocket;
     private static ServerAPI serverAPI;
     private static volatile boolean running = false;
+    private static Properties serverConfig = new Properties();
+    
+    // 世界数据
+    private static World world;
+    private static File worldFolder;
+
+    // ============ 世界类 ============
+    public static class World {
+        private final String name;
+        private final Map<Long, Chunk> chunks = new ConcurrentHashMap<>();
+        private final File worldFolder;
+        private final Random random = new Random();
+        
+        public World(String name, File folder) {
+            this.name = name;
+            this.worldFolder = folder;
+            worldFolder.mkdirs();
+        }
+        
+        public Chunk getChunk(int chunkX, int chunkZ) {
+            long key = ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
+            return chunks.computeIfAbsent(key, k -> loadOrGenerateChunk(chunkX, chunkZ));
+        }
+        
+        private Chunk loadOrGenerateChunk(int chunkX, int chunkZ) {
+            File chunkFile = new File(worldFolder, "chunk_" + chunkX + "_" + chunkZ + ".dat");
+            
+            if (chunkFile.exists()) {
+                return loadChunk(chunkFile);
+            } else {
+                return generateChunk(chunkX, chunkZ, chunkFile);
+            }
+        }
+        
+        private Chunk generateChunk(int chunkX, int chunkZ, File file) {
+            Chunk chunk = new Chunk(chunkX, chunkZ);
+            
+            // 生成地形
+            for (int x = 0; x < 16; x++) {
+                for (int z = 0; z < 16; z++) {
+                    int worldX = chunkX * 16 + x;
+                    int worldZ = chunkZ * 16 + z;
+                    
+                    // 简单地形生成
+                    int height = 64 + (int)(Math.sin(worldX * 0.1) * Math.cos(worldZ * 0.1) * 5);
+                    
+                    for (int y = 0; y <= height; y++) {
+                        String blockType;
+                        if (y == height) {
+                            blockType = "minecraft:grass_block";
+                        } else if (y > height - 3) {
+                            blockType = "minecraft:dirt";
+                        } else {
+                            blockType = "minecraft:stone";
+                        }
+                        chunk.setBlock(x, y, z, blockType);
+                    }
+                    
+                    // 生成树
+                    if (random.nextInt(100) < 5 && height > 64) {
+                        generateTree(chunk, x, height + 1, z);
+                    }
+                }
+            }
+            
+            // 保存区块
+            saveChunk(chunk, file);
+            return chunk;
+        }
+        
+        private void generateTree(Chunk chunk, int x, int y, int z) {
+            // 树干
+            for (int i = 0; i < 4; i++) {
+                chunk.setBlock(x, y + i, z, "minecraft:oak_log");
+            }
+            // 树叶
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    for (int dy = 2; dy <= 4; dy++) {
+                        if (Math.abs(dx) + Math.abs(dz) + Math.abs(dy - 3) <= 3) {
+                            chunk.setBlock(x + dx, y + dy, z + dz, "minecraft:oak_leaves");
+                        }
+                    }
+                }
+            }
+        }
+        
+        private void saveChunk(Chunk chunk, File file) {
+            try (DataOutputStream output = new DataOutputStream(new FileOutputStream(file))) {
+                chunk.save(output);
+            } catch (IOException e) {
+                logger.warning("保存区块失败: " + e.getMessage());
+            }
+        }
+        
+        private Chunk loadChunk(File file) {
+            Chunk chunk = new Chunk(0, 0);
+            try (DataInputStream input = new DataInputStream(new FileInputStream(file))) {
+                chunk.load(input);
+            } catch (IOException e) {
+                logger.warning("加载区块失败: " + e.getMessage());
+            }
+            return chunk;
+        }
+        
+        public void saveAll() {
+            chunks.forEach((key, chunk) -> {
+                File chunkFile = new File(worldFolder, "chunk_" + chunk.chunkX + "_" + chunk.chunkZ + ".dat");
+                saveChunk(chunk, chunkFile);
+            });
+        }
+    }
+
+    // ============ 区块类 ============
+    public static class Chunk {
+        private final int chunkX;
+        private final int chunkZ;
+        private final String[][][] blocks = new String[16][256][16];
+        
+        public Chunk(int chunkX, int chunkZ) {
+            this.chunkX = chunkX;
+            this.chunkZ = chunkZ;
+        }
+        
+        public void setBlock(int x, int y, int z, String blockType) {
+            if (x >= 0 && x < 16 && y >= 0 && y < 256 && z >= 0 && z < 16) {
+                blocks[x][y][z] = blockType;
+            }
+        }
+        
+        public String getBlock(int x, int y, int z) {
+            if (x >= 0 && x < 16 && y >= 0 && y < 256 && z >= 0 && z < 16) {
+                return blocks[x][y][z];
+            }
+            return null;
+        }
+        
+        public void save(DataOutputStream output) throws IOException {
+            output.writeInt(chunkX);
+            output.writeInt(chunkZ);
+            
+            for (int x = 0; x < 16; x++) {
+                for (int y = 0; y < 256; y++) {
+                    for (int z = 0; z < 16; z++) {
+                        String block = blocks[x][y][z];
+                        if (block != null) {
+                            output.writeBoolean(true);
+                            output.writeUTF(block);
+                        } else {
+                            output.writeBoolean(false);
+                        }
+                    }
+                }
+            }
+        }
+        
+        public void load(DataInputStream input) throws IOException {
+            input.readInt(); // chunkX
+            input.readInt(); // chunkZ
+            
+            for (int x = 0; x < 16; x++) {
+                for (int y = 0; y < 256; y++) {
+                    for (int z = 0; z < 16; z++) {
+                        if (input.readBoolean()) {
+                            blocks[x][y][z] = input.readUTF();
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // ============ MC玩家类 ============
     public static class MCPlayer {
         private final String username;
+        private final UUID uuid;
         private final Socket socket;
         private final DataInputStream input;
         private final DataOutputStream output;
         private double x = 0, y = 64, z = 0;
         private float yaw = 0, pitch = 0;
+        private boolean onGround = true;
         
-        public MCPlayer(String username, Socket socket) throws IOException {
+        // 装备栏
+        private final String[] equipment = new String[6]; // 0=主手,1=副手,2=头盔,3=胸甲,4=护腿,5=靴子
+        // 背包
+        private final String[] inventory = new String[36];
+        // 生命值
+        private float health = 20.0f;
+        private float maxHealth = 20.0f;
+        // 饥饿值
+        private int foodLevel = 20;
+        // 经验
+        private int experience = 0;
+        private int level = 0;
+        
+        public MCPlayer(String username, UUID uuid, Socket socket) throws IOException {
             this.username = username;
+            this.uuid = uuid;
             this.socket = socket;
             this.input = new DataInputStream(socket.getInputStream());
             this.output = new DataOutputStream(socket.getOutputStream());
         }
         
         public String getUsername() { return username; }
+        public UUID getUUID() { return uuid; }
         public double getX() { return x; }
         public double getY() { return y; }
         public double getZ() { return z; }
@@ -57,21 +250,16 @@ public class PluginServer {
             this.x = x;
             this.y = y;
             this.z = z;
-            // 发送传送包
             sendPlayerPosition();
         }
         
         public void sendMessage(String message) {
             try {
-                // 发送聊天消息包 (0x65)
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                 DataOutputStream packet = new DataOutputStream(buffer);
                 
-                // 包ID (0x65 = System Chat Message)
                 writeVarInt(packet, 0x65);
-                // 消息内容
                 writeString(packet, message);
-                // 消息类型 (0 = SYSTEM)
                 writeVarInt(packet, 0);
                 
                 sendPacket(buffer.toByteArray());
@@ -80,20 +268,78 @@ public class PluginServer {
             }
         }
         
+        public void setEquipment(int slot, String item) {
+            if (slot >= 0 && slot < equipment.length) {
+                equipment[slot] = item;
+                sendEquipmentUpdate(slot, item);
+            }
+        }
+        
+        public void setInventoryItem(int slot, String item) {
+            if (slot >= 0 && slot < inventory.length) {
+                inventory[slot] = item;
+                sendInventoryUpdate(slot, item);
+            }
+        }
+        
+        private void sendEquipmentUpdate(int slot, String item) {
+            try {
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                DataOutputStream packet = new DataOutputStream(buffer);
+                
+                writeVarInt(packet, 0x5B); // Set Equipment
+                writeVarInt(packet, 0); // Entity ID (self)
+                writeVarInt(packet, slot);
+                writeItemStack(packet, item);
+                
+                sendPacket(buffer.toByteArray());
+            } catch (IOException e) {
+                logger.warning("发送装备更新失败: " + e.getMessage());
+            }
+        }
+        
+        private void sendInventoryUpdate(int slot, String item) {
+            try {
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                DataOutputStream packet = new DataOutputStream(buffer);
+                
+                writeVarInt(packet, 0x14); // Set Container Slot
+                packet.writeByte(0); // Window ID
+                writeVarInt(packet, 0); // State ID
+                packet.writeShort(slot);
+                writeItemStack(packet, item);
+                
+                sendPacket(buffer.toByteArray());
+            } catch (IOException e) {
+                logger.warning("发送背包更新失败: " + e.getMessage());
+            }
+        }
+        
+        private void writeItemStack(DataOutputStream packet, String item) throws IOException {
+            if (item == null || item.isEmpty()) {
+                packet.writeBoolean(false); // No item
+            } else {
+                packet.writeBoolean(true); // Has item
+                writeVarInt(packet, 1); // Item ID (diamond sword = 1 for simplicity)
+                packet.writeByte(1); // Count
+                // No NBT data
+                packet.writeByte(0); // End of NBT
+            }
+        }
+        
         private void sendPlayerPosition() {
             try {
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                 DataOutputStream packet = new DataOutputStream(buffer);
                 
-                // 包ID (0x3E = Synchronize Player Position)
                 writeVarInt(packet, 0x3E);
                 packet.writeDouble(x);
                 packet.writeDouble(y);
                 packet.writeDouble(z);
                 packet.writeFloat(yaw);
                 packet.writeFloat(pitch);
-                packet.writeByte(0); // flags
-                writeVarInt(packet, 0); // teleport ID
+                packet.writeByte(0);
+                writeVarInt(packet, 0);
                 
                 sendPacket(buffer.toByteArray());
             } catch (IOException e) {
@@ -111,14 +357,13 @@ public class PluginServer {
         
         public void disconnect(String reason) {
             try {
-                // 发送断开包
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                 DataOutputStream packet = new DataOutputStream(buffer);
-                writeVarInt(packet, 0x1B); // Disconnect packet
+                writeVarInt(packet, 0x1B);
                 writeString(packet, reason);
                 sendPacket(buffer.toByteArray());
             } catch (IOException e) {
-                // 忽略断开错误
+                // 忽略
             } finally {
                 try {
                     socket.close();
@@ -151,6 +396,8 @@ public class PluginServer {
         Logger getLogger();
         Collection<MCPlayer> getOnlinePlayers();
         void teleportPlayer(MCPlayer player, double x, double y, double z);
+        World getWorld();
+        void setBlock(int x, int y, int z, String blockType);
     }
 
     // ============ 服务器API实现 ============
@@ -186,6 +433,19 @@ public class PluginServer {
         public void teleportPlayer(MCPlayer player, double x, double y, double z) {
             player.teleport(x, y, z);
         }
+        
+        @Override
+        public World getWorld() {
+            return world;
+        }
+        
+        @Override
+        public void setBlock(int x, int y, int z, String blockType) {
+            int chunkX = x >> 4;
+            int chunkZ = z >> 4;
+            Chunk chunk = world.getChunk(chunkX, chunkZ);
+            chunk.setBlock(x & 15, y, z & 15, blockType);
+        }
     }
 
     // ============ 插件类加载器 ============
@@ -213,6 +473,12 @@ public class PluginServer {
     // ============ 主方法 ============
     public static void main(String[] args) {
         printBanner();
+        
+        // 加载配置
+        loadConfig();
+        
+        // 加载世界
+        loadWorld();
         
         // 初始化服务器API
         serverAPI = new ServerAPIImpl();
@@ -246,6 +512,74 @@ public class PluginServer {
         }
     }
 
+    // ============ 加载配置 ============
+    private static void loadConfig() {
+        File configFile = new File("Mintropyserver.properties");
+        
+        if (!configFile.exists()) {
+            logger.info("创建默认配置文件: Mintropyserver.properties");
+            try (FileOutputStream output = new FileOutputStream(configFile)) {
+                Properties defaultConfig = new Properties();
+                defaultConfig.setProperty("server-name", SERVER_NAME);
+                defaultConfig.setProperty("server-port", String.valueOf(PORT));
+                defaultConfig.setProperty("max-players", String.valueOf(MAX_PLAYERS));
+                defaultConfig.setProperty("motd", MOTD);
+                defaultConfig.setProperty("mc-version", MC_VERSION);
+                defaultConfig.setProperty("view-distance", String.valueOf(VIEW_DISTANCE));
+                defaultConfig.setProperty("simulation-distance", String.valueOf(SIMULATION_DISTANCE));
+                defaultConfig.setProperty("world-name", "MintropyWorld");
+                defaultConfig.store(output, "Mintropy Server Configuration");
+            } catch (IOException e) {
+                logger.warning("创建配置文件失败: " + e.getMessage());
+            }
+            return;
+        }
+        
+        try (FileInputStream input = new FileInputStream(configFile)) {
+            serverConfig.load(input);
+            
+            SERVER_NAME = serverConfig.getProperty("server-name", SERVER_NAME);
+            PORT = Integer.parseInt(serverConfig.getProperty("server-port", String.valueOf(PORT)));
+            MAX_PLAYERS = Integer.parseInt(serverConfig.getProperty("max-players", String.valueOf(MAX_PLAYERS)));
+            MOTD = serverConfig.getProperty("motd", MOTD);
+            MC_VERSION = serverConfig.getProperty("mc-version", MC_VERSION);
+            VIEW_DISTANCE = Integer.parseInt(serverConfig.getProperty("view-distance", String.valueOf(VIEW_DISTANCE)));
+            SIMULATION_DISTANCE = Integer.parseInt(serverConfig.getProperty("simulation-distance", String.valueOf(SIMULATION_DISTANCE)));
+            
+            logger.info("配置文件加载完成: " + configFile.getAbsolutePath());
+            logger.info("服务器名称: " + SERVER_NAME);
+            logger.info("端口: " + PORT);
+            logger.info("最大玩家数: " + MAX_PLAYERS);
+            
+        } catch (IOException e) {
+            logger.warning("读取配置文件失败: " + e.getMessage());
+        }
+    }
+
+    // ============ 加载世界 ============
+    private static void loadWorld() {
+        String worldName = serverConfig.getProperty("world-name", "MintropyWorld");
+        worldFolder = new File(worldName);
+        
+        if (worldFolder.exists()) {
+            logger.info("加载现有世界: " + worldName);
+        } else {
+            logger.info("生成新世界: " + worldName);
+            worldFolder.mkdirs();
+        }
+        
+        world = new World(worldName, worldFolder);
+        
+        // 预生成出生点附近区块
+        logger.info("预生成出生点区块...");
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                world.getChunk(dx, dz);
+            }
+        }
+        logger.info("世界加载完成");
+    }
+
     // ============ 启动MC服务器 ============
     private static void startMCServer() {
         try {
@@ -258,7 +592,6 @@ public class PluginServer {
             logger.info("等待客户端连接...");
             logger.info("输入 'help' 查看可用命令");
             
-            // 接受客户端连接
             Thread acceptThread = new Thread(() -> {
                 while (running) {
                     try {
@@ -288,7 +621,6 @@ public class PluginServer {
                 DataInputStream input = new DataInputStream(socket.getInputStream());
                 DataOutputStream output = new DataOutputStream(socket.getOutputStream());
                 
-                // 读取握手包
                 int packetLength = readVarInt(input);
                 byte[] packetData = new byte[packetLength];
                 input.readFully(packetData);
@@ -297,31 +629,22 @@ public class PluginServer {
                 int packetId = readVarInt(packet);
                 
                 if (packetId != 0x00) {
-                    logger.warning("期望握手包，收到: 0x" + Integer.toHexString(packetId));
                     socket.close();
                     return;
                 }
                 
-                // 解析握手包
                 int protocolVersion = readVarInt(packet);
                 String serverAddress = readString(packet);
                 int serverPort = packet.readUnsignedShort();
                 int nextState = readVarInt(packet);
                 
-                logger.info("握手: 协议=" + protocolVersion + ", 地址=" + serverAddress + ", 状态=" + nextState);
-                
                 if (nextState == 1) {
-                    // Status请求
                     handleStatusRequest(input, output);
                 } else if (nextState == 2) {
-                    // Login请求
                     handleLoginRequest(socket, input, output);
-                } else {
-                    socket.close();
                 }
                 
             } catch (Exception e) {
-                logger.warning("处理客户端连接失败: " + e.getMessage());
                 try {
                     socket.close();
                 } catch (IOException ex) {
@@ -330,41 +653,36 @@ public class PluginServer {
             }
         });
         clientThread.setDaemon(true);
-        clientThread.setName("ClientThread");
         clientThread.start();
     }
 
     // ============ 处理状态请求 ============
     private static void handleStatusRequest(DataInputStream input, DataOutputStream output) throws IOException {
-        // 读取状态请求包
         int packetLength = readVarInt(input);
         byte[] packetData = new byte[packetLength];
         input.readFully(packetData);
         
-        // 发送状态响应
         String statusJson = "{\"version\":{\"name\":\"" + MC_VERSION + "\",\"protocol\":" + PROTOCOL_VERSION + "}," +
-                           "\"players\":{\"max\":100,\"online\":" + onlinePlayers.size() + "}," +
-                           "\"description\":{\"text\":\"§a§lMintropy Server\"}}";
+                           "\"players\":{\"max\":" + MAX_PLAYERS + ",\"online\":" + onlinePlayers.size() + "}," +
+                           "\"description\":{\"text\":\"" + MOTD + "\"}}";
         
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x00); // Status Response
+        writeVarInt(packet, 0x00);
         writeString(packet, statusJson);
         
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
         output.flush();
         
-        // 等待Ping
         packetLength = readVarInt(input);
         packetData = new byte[packetLength];
         input.readFully(packetData);
         
-        // 发送Pong
         buffer = new ByteArrayOutputStream();
         packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x01); // Pong
-        packet.write(packetData); // Echo back
+        writeVarInt(packet, 0x01);
+        packet.write(packetData);
         
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
@@ -373,7 +691,6 @@ public class PluginServer {
 
     // ============ 处理登录请求 ============
     private static void handleLoginRequest(Socket socket, DataInputStream input, DataOutputStream output) throws IOException {
-        // 读取登录开始包
         int packetLength = readVarInt(input);
         byte[] packetData = new byte[packetLength];
         input.readFully(packetData);
@@ -382,39 +699,32 @@ public class PluginServer {
         int packetId = readVarInt(packet);
         
         if (packetId != 0x00) {
-            logger.warning("期望登录开始包");
             socket.close();
             return;
         }
         
         String username = readString(packet);
-        logger.info("玩家登录: " + username);
+        UUID playerUUID = UUID.randomUUID();
         
-        // 发送登录成功包
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream response = new DataOutputStream(buffer);
-        writeVarInt(response, 0x02); // Login Success
-        writeString(response, java.util.UUID.randomUUID().toString());
+        writeVarInt(response, 0x02);
+        writeString(response, playerUUID.toString());
         writeString(response, username);
         
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
         output.flush();
         
-        // 创建玩家对象
-        MCPlayer player = new MCPlayer(username, socket);
+        MCPlayer player = new MCPlayer(username, playerUUID, socket);
         onlinePlayers.put(username, player);
         
-        // 发送加入游戏包
         sendJoinGame(output);
-        
-        // 发送玩家位置
         sendPlayerPositionAndLook(output);
         
         logger.info("玩家 " + username + " 已加入游戏！");
         serverAPI.broadcastMessage("§e" + username + " §a加入了服务器");
         
-        // 处理游戏内数据包
         handleGamePackets(player);
     }
 
@@ -423,24 +733,24 @@ public class PluginServer {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
         
-        writeVarInt(packet, 0x2B); // Join Game
-        packet.writeInt(0); // Entity ID
-        packet.writeBoolean(false); // Is hardcore
-        packet.writeByte(1); // Gamemode (Creative)
-        packet.writeByte(-1); // Previous gamemode
-        writeVarInt(packet, 1); // Dimension count
-        writeString(packet, "minecraft:overworld"); // Dimension name
-        writeString(packet, "minecraft:overworld"); // Dimension type
-        writeString(packet, "minecraft:overworld"); // World name
-        packet.writeLong(0); // Hashed seed
-        packet.writeByte(100); // Max players
-        writeVarInt(packet, 10); // View distance
-        writeVarInt(packet, 10); // Simulation distance
-        packet.writeBoolean(false); // Reduced debug info
-        packet.writeBoolean(true); // Enable respawn screen
-        packet.writeBoolean(false); // Is debug
-        packet.writeBoolean(false); // Is flat
-        packet.writeBoolean(false); // Has death location
+        writeVarInt(packet, 0x2B);
+        packet.writeInt(0);
+        packet.writeBoolean(false);
+        packet.writeByte(1);
+        packet.writeByte(-1);
+        writeVarInt(packet, 1);
+        writeString(packet, "minecraft:overworld");
+        writeString(packet, "minecraft:overworld");
+        writeString(packet, world.name);
+        packet.writeLong(0);
+        packet.writeByte(MAX_PLAYERS);
+        writeVarInt(packet, VIEW_DISTANCE);
+        writeVarInt(packet, SIMULATION_DISTANCE);
+        packet.writeBoolean(false);
+        packet.writeBoolean(true);
+        packet.writeBoolean(false);
+        packet.writeBoolean(false);
+        packet.writeBoolean(false);
         
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
@@ -452,14 +762,14 @@ public class PluginServer {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
         
-        writeVarInt(packet, 0x3E); // Synchronize Player Position
-        packet.writeDouble(0); // X
-        packet.writeDouble(64); // Y
-        packet.writeDouble(0); // Z
-        packet.writeFloat(0); // Yaw
-        packet.writeFloat(0); // Pitch
-        packet.writeByte(0); // Flags
-        writeVarInt(packet, 0); // Teleport ID
+        writeVarInt(packet, 0x3E);
+        packet.writeDouble(0);
+        packet.writeDouble(65);
+        packet.writeDouble(0);
+        packet.writeFloat(0);
+        packet.writeFloat(0);
+        packet.writeByte(0);
+        writeVarInt(packet, 0);
         
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
@@ -489,11 +799,13 @@ public class PluginServer {
                         player.x = packet.readDouble();
                         player.y = packet.readDouble();
                         player.z = packet.readDouble();
+                        player.onGround = packet.readBoolean();
                         break;
                         
                     case 0x1B: // Player Rotation
                         player.yaw = packet.readFloat();
                         player.pitch = packet.readFloat();
+                        player.onGround = packet.readBoolean();
                         break;
                         
                     case 0x1C: // Player Position and Rotation
@@ -502,18 +814,44 @@ public class PluginServer {
                         player.z = packet.readDouble();
                         player.yaw = packet.readFloat();
                         player.pitch = packet.readFloat();
+                        player.onGround = packet.readBoolean();
+                        break;
+                        
+                    case 0x1D: // Player Action (挖掘方块等)
+                        int action = readVarInt(packet);
+                        int blockX = packet.readInt();
+                        int blockY = packet.readInt();
+                        int blockZ = packet.readInt();
+                        handleBlockAction(player, action, blockX, blockY, blockZ);
                         break;
                         
                     default:
-                        // 忽略其他包
                         break;
                 }
             }
         } catch (IOException e) {
-            // 玩家断开连接
             onlinePlayers.remove(player.getUsername());
             logger.info("玩家 " + player.getUsername() + " 断开连接");
             serverAPI.broadcastMessage("§e" + player.getUsername() + " §c离开了服务器");
+        }
+    }
+
+    // ============ 处理方块操作 ============
+    private static void handleBlockAction(MCPlayer player, int action, int x, int y, int z) {
+        switch (action) {
+            case 0: // 开始挖掘
+                // 移除方块
+                serverAPI.setBlock(x, y, z, "minecraft:air");
+                break;
+            case 1: // 取消挖掘
+                break;
+            case 2: // 完成挖掘
+                serverAPI.setBlock(x, y, z, "minecraft:air");
+                break;
+            case 3: // 放置方块
+                // 简化处理，在点击位置放置石头
+                serverAPI.setBlock(x, y + 1, z, "minecraft:stone");
+                break;
         }
     }
 
@@ -546,7 +884,7 @@ public class PluginServer {
         
         switch (command) {
             case "spawn":
-                player.teleport(0, 64, 0);
+                player.teleport(0, 65, 0);
                 player.sendMessage("§a已传送到出生点！");
                 break;
                 
@@ -614,13 +952,16 @@ public class PluginServer {
                 if (args.length > 0) {
                     String message = String.join(" ", args);
                     serverAPI.broadcastMessage("§c[广播] §f" + message);
-                } else {
-                    logger.info("用法: broadcast <消息>");
                 }
                 break;
                 
+            case "save":
+                world.saveAll();
+                logger.info("世界已保存");
+                break;
+                
             default:
-                logger.info("未知命令: " + command + " (输入 'help' 查看帮助)");
+                logger.info("未知命令: " + command);
         }
     }
 
@@ -655,8 +996,6 @@ public class PluginServer {
             return;
         }
         
-        logger.info("发现 " + jarFiles.length + " 个插件文件");
-        
         for (File jarFile : jarFiles) {
             loadPlugin(jarFile);
         }
@@ -666,40 +1005,21 @@ public class PluginServer {
     private static void loadPlugin(File jarFile) {
         try {
             PluginConfig config = readPluginConfig(jarFile);
-            if (config == null) {
-                logger.warning("跳过插件: " + jarFile.getName() + " (缺少有效的plugin.yml)");
-                return;
-            }
+            if (config == null) return;
             
             PluginClassLoader classLoader = new PluginClassLoader(
                 new URL[]{jarFile.toURI().toURL()},
                 PluginServer.class.getClassLoader()
             );
             
-            Class<?> pluginClass;
-            try {
-                pluginClass = classLoader.loadClass(config.mainClass);
-            } catch (ClassNotFoundException e) {
-                logger.warning("找不到插件主类: " + config.mainClass);
-                classLoader.close();
-                return;
-            }
+            Class<?> pluginClass = classLoader.loadClass(config.mainClass);
             
             if (!Plugin.class.isAssignableFrom(pluginClass)) {
-                logger.warning("插件主类必须实现 Plugin 接口: " + config.mainClass);
                 classLoader.close();
                 return;
             }
             
-            Plugin plugin;
-            try {
-                plugin = (Plugin) pluginClass.getDeclaredConstructor().newInstance();
-            } catch (Exception e) {
-                logger.warning("无法实例化插件: " + config.mainClass + " - " + e.getMessage());
-                classLoader.close();
-                return;
-            }
-            
+            Plugin plugin = (Plugin) pluginClass.getDeclaredConstructor().newInstance();
             injectServerAPI(plugin, serverAPI);
             
             plugins.put(plugin.getName(), plugin);
@@ -709,7 +1029,6 @@ public class PluginServer {
             
         } catch (Exception e) {
             logger.severe("✗ 加载插件失败: " + jarFile.getName() + " - " + e.getMessage());
-            e.printStackTrace();
         }
     }
 
@@ -717,10 +1036,7 @@ public class PluginServer {
     private static PluginConfig readPluginConfig(File jarFile) {
         try (JarFile jar = new JarFile(jarFile)) {
             JarEntry entry = jar.getJarEntry("plugin.yml");
-            if (entry == null) {
-                logger.warning("插件缺少 plugin.yml: " + jarFile.getName());
-                return null;
-            }
+            if (entry == null) return null;
             
             try (InputStream input = jar.getInputStream(entry)) {
                 Properties props = new Properties();
@@ -728,192 +1044,4 @@ public class PluginServer {
                 
                 String name = props.getProperty("name");
                 String version = props.getProperty("version");
-                String main = props.getProperty("main");
-                
-                if (name == null || version == null || main == null) {
-                    logger.warning("plugin.yml 缺少必要字段: " + jarFile.getName());
-                    return null;
-                }
-                
-                PluginConfig config = new PluginConfig(name, version, main);
-                config.description = props.getProperty("description");
-                config.author = props.getProperty("author");
-                
-                return config;
-            }
-        } catch (IOException e) {
-            logger.warning("读取 plugin.yml 失败: " + e.getMessage());
-            return null;
-        }
-    }
-
-    // ============ 注入服务器API ============
-    private static void injectServerAPI(Plugin plugin, ServerAPI api) {
-        try {
-            Arrays.stream(plugin.getClass().getMethods())
-                .filter(method -> method.getName().equals("setServerAPI"))
-                .filter(method -> method.getParameterCount() == 1)
-                .filter(method -> method.getParameterTypes()[0].isAssignableFrom(ServerAPI.class))
-                .findFirst()
-                .ifPresent(method -> {
-                    try {
-                        method.invoke(plugin, api);
-                    } catch (Exception e) {
-                        logger.warning("注入ServerAPI失败: " + e.getMessage());
-                    }
-                });
-        } catch (Exception e) {
-            logger.warning("注入ServerAPI时出错: " + e.getMessage());
-        }
-    }
-
-    // ============ 启用所有插件 ============
-    public static void enableAllPlugins() {
-        plugins.forEach((name, plugin) -> {
-            try {
-                plugin.onEnable();
-                logger.info("✓ 启用插件: " + plugin.getName());
-            } catch (Exception e) {
-                logger.severe("✗ 启用插件失败: " + plugin.getName() + " - " + e.getMessage());
-                e.printStackTrace();
-            }
-        });
-    }
-
-    // ============ 禁用所有插件 ============
-    public static void disableAllPlugins() {
-        plugins.forEach((name, plugin) -> {
-            try {
-                plugin.onDisable();
-                logger.info("禁用插件: " + plugin.getName());
-            } catch (Exception e) {
-                logger.severe("禁用插件失败: " + plugin.getName() + " - " + e.getMessage());
-            }
-        });
-        plugins.clear();
-    }
-
-    // ============ 停止服务器 ============
-    public static void stop() {
-        if (!running) return;
-        logger.info("正在关闭服务器...");
-        running = false;
-        
-        disableAllPlugins();
-        scheduler.shutdown();
-        
-        // 断开所有玩家
-        onlinePlayers.values().forEach(player -> player.disconnect("§c服务器关闭"));
-        onlinePlayers.clear();
-        
-        // 关闭服务器Socket
-        try {
-            if (serverSocket != null && !serverSocket.isClosed()) {
-                serverSocket.close();
-            }
-        } catch (IOException e) {
-            logger.warning("关闭服务器Socket失败: " + e.getMessage());
-        }
-        
-        classLoaders.values().forEach(loader -> {
-            try {
-                loader.close();
-            } catch (IOException e) {
-                logger.warning("关闭类加载器失败: " + e.getMessage());
-            }
-        });
-        
-        logger.info("服务器已关闭");
-    }
-
-    // ============ 工具方法 ============
-    private static int readVarInt(DataInputStream input) throws IOException {
-        int result = 0;
-        int position = 0;
-        byte currentByte;
-        
-        do {
-            currentByte = input.readByte();
-            result |= (currentByte & 0x7F) << position;
-            position += 7;
-            
-            if (position >= 32) {
-                throw new IOException("VarInt too big");
-            }
-        } while ((currentByte & 0x80) != 0);
-        
-        return result;
-    }
-
-    private static void writeVarInt(DataOutputStream output, int value) throws IOException {
-        do {
-            byte temp = (byte) (value & 0x7F);
-            value >>>= 7;
-            if (value != 0) {
-                temp |= 0x80;
-            }
-            output.writeByte(temp);
-        } while (value != 0);
-    }
-
-    private static String readString(DataInputStream input) throws IOException {
-        int length = readVarInt(input);
-        byte[] bytes = new byte[length];
-        input.readFully(bytes);
-        return new String(bytes, StandardCharsets.UTF_8);
-    }
-
-    private static void writeString(DataOutputStream output, String string) throws IOException {
-        byte[] bytes = string.getBytes(StandardCharsets.UTF_8);
-        writeVarInt(output, bytes.length);
-        output.write(bytes);
-    }
-
-    // ============ 列出所有插件 ============
-    private static void listPlugins() {
-        if (plugins.isEmpty()) {
-            logger.info("当前没有加载任何插件");
-            return;
-        }
-        
-        logger.info("已加载的插件 (" + plugins.size() + "):");
-        plugins.values().forEach(plugin -> 
-            logger.info("  • " + plugin.getName() + " v" + plugin.getVersion())
-        );
-    }
-
-    // ============ 重新加载插件 ============
-    private static void reloadPlugins() {
-        logger.info("重新加载插件...");
-        disableAllPlugins();
-        plugins.clear();
-        commands.clear();
-        loadPlugins("plugins");
-        enableAllPlugins();
-        logger.info("插件重新加载完成");
-    }
-
-    // ============ 打印横幅 ============
-    private static void printBanner() {
-        System.out.println("=================================");
-        System.out.println("   Mintropy MC Server v" + VERSION);
-        System.out.println("   纯Java实现的Minecraft服务器");
-        System.out.println("   MC版本: " + MC_VERSION);
-        System.out.println("=================================");
-        System.out.flush();
-    }
-
-    // ============ 显示帮助 ============
-    private static void showHelp() {
-        System.out.println("\n========== 控制台命令 ==========");
-        System.out.println("  stop       - 停止服务器");
-        System.out.println("  plugins    - 列出所有插件");
-        System.out.println("  reload     - 重新加载插件");
-        System.out.println("  players    - 列出在线玩家");
-        System.out.println("  broadcast  - 广播消息");
-        System.out.println("  version    - 显示版本信息");
-        System.out.println("  help       - 显示此帮助");
-        System.out.println("================================\n");
-        System.out.flush();
-    }
-}
+                String
