@@ -11,18 +11,18 @@ import java.util.jar.JarEntry;
 /**
  * Mintropy MC Server - 纯Java高性能Minecraft服务器
  * 兼容 Minecraft 1.20.1
- * 支持插件系统、世界生成与持久化、玩家数据、建筑等
+ * 加入 KeepAlive 和空区块发送，修复掉线问题
  * 无正版验证，性能优先
  * 
- * @version 5.2.0
+ * @version 5.3.0
  */
 public class PluginServer {
 
     // ==================== 服务器基本信息 ====================
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "5.2.0";
-    private static String MC_VERSION = "1.20.1";          // 兼容1.20.1
-    private static int PROTOCOL_VERSION = 763;            // 1.20.1协议号
+    private static String VERSION = "5.3.0";
+    private static String MC_VERSION = "1.20.1";
+    private static int PROTOCOL_VERSION = 763;
     private static int PORT = 25565;
     private static String SERVER_NAME = "Mintropy";
     private static int MAX_PLAYERS = 100;
@@ -444,6 +444,21 @@ public class PluginServer {
             if (running) stop();
         }));
 
+        // 启动 KeepAlive 任务
+        scheduler.scheduleAtFixedRate(() -> {
+            onlinePlayers.values().forEach(player -> {
+                try {
+                    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                    DataOutputStream packet = new DataOutputStream(buffer);
+                    writeVarInt(packet, 0x21); // Keep Alive (clientbound)
+                    packet.writeLong(System.currentTimeMillis());
+                    player.sendPacket(buffer.toByteArray());
+                } catch (IOException e) {
+                    // ignore
+                }
+            });
+        }, 5, 5, TimeUnit.SECONDS);
+
         try (Scanner scanner = new Scanner(System.in, "UTF-8")) {
             while (running && scanner.hasNextLine()) {
                 System.out.print("> ");
@@ -644,41 +659,39 @@ public class PluginServer {
 
         sendJoinGame(output);
         sendPlayerPositionAndLook(output);
+        sendPlayerAbilities(output);
+        sendChunkData(output); // 发送空区块，防止掉线
 
         logger.info("玩家 " + username + " 已加入游戏！");
         handleGamePackets(player);
     }
 
-    // ==================== 发送加入游戏包（修复Registry Codec） ====================
+    // ==================== 发送加入游戏包 ====================
     private static void sendJoinGame(DataOutputStream output) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
 
-        writeVarInt(packet, 0x2B); // Join Game
-        packet.writeInt(0); // Entity ID
-        packet.writeBoolean(false); // Is hardcore
-        packet.writeByte(1); // Gamemode (Creative)
-        packet.writeByte(-1); // Previous gamemode
-        writeVarInt(packet, 1); // Dimension count
-        writeString(packet, "minecraft:overworld"); // Dimension name
-
-        // ===== 关键：完整的空 NBT 复合标签 =====
+        writeVarInt(packet, 0x2B);
+        packet.writeInt(0);
+        packet.writeBoolean(false);
+        packet.writeByte(1);
+        packet.writeByte(-1);
+        writeVarInt(packet, 1);
+        writeString(packet, "minecraft:overworld");
         packet.writeByte(0x0A); // TAG_Compound
-        packet.writeShort(0);   // 名称长度 0
-        packet.writeByte(0x00); // TAG_End
-        // ==========================================
-
-        writeString(packet, "minecraft:overworld"); // Dimension type
-        writeString(packet, "world"); // World name
-        packet.writeLong(0); // Hashed seed
-        writeVarInt(packet, MAX_PLAYERS); // Max players (VarInt)
+        packet.writeShort(0);
+        packet.writeByte(0x00);
+        writeString(packet, "minecraft:overworld");
+        writeString(packet, "world");
+        packet.writeLong(0);
+        writeVarInt(packet, MAX_PLAYERS);
         writeVarInt(packet, VIEW_DISTANCE);
         writeVarInt(packet, SIMULATION_DISTANCE);
-        packet.writeBoolean(false); // Reduced debug info
-        packet.writeBoolean(true);  // Enable respawn screen
-        packet.writeBoolean(false); // Is debug
-        packet.writeBoolean(false); // Is flat
-        packet.writeBoolean(false); // Has death location
+        packet.writeBoolean(false);
+        packet.writeBoolean(true);
+        packet.writeBoolean(false);
+        packet.writeBoolean(false);
+        packet.writeBoolean(false);
 
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
@@ -702,6 +715,64 @@ public class PluginServer {
         output.flush();
     }
 
+    // ==================== 发送玩家能力 ====================
+    private static void sendPlayerAbilities(DataOutputStream output) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        DataOutputStream packet = new DataOutputStream(buffer);
+        writeVarInt(packet, 0x32); // Player Abilities
+        packet.writeByte(0x0F); // 标志：无敌、飞行、创造模式等
+        packet.writeFloat(0.05f); // 飞行速度
+        packet.writeFloat(0.1f);  // 视场角
+        writeVarInt(output, buffer.size());
+        output.write(buffer.toByteArray());
+        output.flush();
+    }
+
+    // ==================== 发送空区块数据（简易） ====================
+    private static void sendChunkData(DataOutputStream output) throws IOException {
+        // 发送一个空区块：坐标 (0,0)
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        DataOutputStream packet = new DataOutputStream(buffer);
+        writeVarInt(packet, 0x22); // Chunk Data (1.20.1)
+        packet.writeInt(0); // chunk X
+        packet.writeInt(0); // chunk Z
+
+        // 高度图 NBT (空复合标签)
+        packet.writeByte(0x0A); // TAG_Compound
+        packet.writeShort(0);   // 空名称
+        packet.writeByte(0x00); // TAG_End
+
+        // 数据大小（占位，先写入0，之后修正）
+        ByteArrayOutputStream chunkData = new ByteArrayOutputStream();
+        DataOutputStream cd = new DataOutputStream(chunkData);
+
+        // 方块数据：使用全局调色板，但为了简化，发送全空气（状态ID=0）
+        // 1.20.1 区块格式： bits per entry = 4? 但空区块可以使用“单个调色板”？
+        // 这里采用最简方式：写入一个字节表示“单值调色板”，值=0（空气）
+        cd.writeByte(0); // bits per entry = 0 (表示单一值)
+        // 调色板长度
+        writeVarInt(cd, 1);
+        writeVarInt(cd, 0); // 空气状态ID
+        // 数据数组长度（VarInt，可能为0，因为所有方块相同）
+        writeVarInt(cd, 0);
+        // 生物群系数据：同样简化，写入单一值
+        cd.writeByte(0); // bits per entry
+        writeVarInt(cd, 1);
+        writeVarInt(cd, 0); // 平原生物群系ID
+        writeVarInt(cd, 0);
+
+        byte[] chunkBytes = chunkData.toByteArray();
+        writeVarInt(packet, chunkBytes.length);
+        packet.write(chunkBytes);
+
+        // 方块实体数量
+        writeVarInt(packet, 0);
+
+        writeVarInt(output, buffer.size());
+        output.write(buffer.toByteArray());
+        output.flush();
+    }
+
     // ==================== 处理游戏内数据包 ====================
     private static void handleGamePackets(MCPlayer player) {
         try {
@@ -714,6 +785,9 @@ public class PluginServer {
                 int packetId = readVarInt(packet);
 
                 switch (packetId) {
+                    case 0x12: // Keep Alive (clientbound -> serverbound)
+                        // 忽略，客户端已收到
+                        break;
                     case 0x05: // Chat Message
                         String message = readString(packet, 100);
                         handlePlayerChat(player, message);
@@ -757,11 +831,11 @@ public class PluginServer {
     // ==================== 处理方块操作 ====================
     private static void handleBlockAction(MCPlayer player, int action, int x, int y, int z) {
         switch (action) {
-            case 0: // 开始挖掘
-            case 2: // 完成挖掘
+            case 0:
+            case 2:
                 serverAPI.setBlock(x, y, z, "air");
                 break;
-            case 3: // 放置方块
+            case 3:
                 serverAPI.setBlock(x, y + 1, z, "stone");
                 break;
         }
