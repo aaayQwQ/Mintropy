@@ -14,13 +14,13 @@ import java.util.jar.JarEntry;
  * 完整实现配置阶段，使用最小注册表数据
  * 无正版验证，性能优先
  * 
- * @version 6.2.0
+ * @version 6.3.0
  */
 public class PluginServer {
 
     // ==================== 服务器基本信息 ====================
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "6.2.0";
+    private static String VERSION = "6.3.0";
     private static String MC_VERSION = "1.20.1";
     private static int PROTOCOL_VERSION = 763;
     private static int PORT = 25565;
@@ -720,9 +720,9 @@ public class PluginServer {
         writeNBTCompoundStart(out, "");
 
         // --- dimension_type 注册表 ---
-        writeNBTString(out, "minecraft:dimension_type");
-        writeNBTListStart(out, "value", 10); // 复合标签列表
-
+        writeNBTCompoundStart(out, "minecraft:dimension_type");
+        writeNBTString(out, "type", "minecraft:dimension_type");
+        writeNBTListStartWithCount(out, "value", 10, 1); // 一个元素
         // 条目：minecraft:overworld
         writeNBTCompoundStart(out, "");
         writeNBTString(out, "name", "minecraft:overworld");
@@ -748,14 +748,12 @@ public class PluginServer {
         writeNBTInt(out, "monster_spawn_block_light_limit", 0);
         writeNBTCompoundEnd(out);
         writeNBTCompoundEnd(out);
-
-        // 结束 dimension_type 列表
-        writeNBTListEnd(out);
+        writeNBTCompoundEnd(out); // 结束 dimension_type 注册表复合标签
 
         // --- worldgen/biome 注册表 ---
-        writeNBTString(out, "minecraft:worldgen/biome");
-        writeNBTListStart(out, "value", 10);
-
+        writeNBTCompoundStart(out, "minecraft:worldgen/biome");
+        writeNBTString(out, "type", "minecraft:worldgen/biome");
+        writeNBTListStartWithCount(out, "value", 10, 1);
         // 条目：minecraft:plains
         writeNBTCompoundStart(out, "");
         writeNBTString(out, "name", "minecraft:plains");
@@ -772,15 +770,13 @@ public class PluginServer {
         writeNBTCompoundEnd(out);
         writeNBTCompoundEnd(out);
         writeNBTCompoundEnd(out);
-
-        // 结束 worldgen/biome 列表
-        writeNBTListEnd(out);
+        writeNBTCompoundEnd(out); // 结束 worldgen/biome 注册表复合标签
 
         // 根复合标签结束
         writeNBTCompoundEnd(out);
     }
 
-    // ==================== NBT 写入辅助方法（修正版，无重复） ====================
+    // ==================== NBT 写入辅助方法 ====================
     private static void writeNBTCompoundStart(DataOutputStream out, String name) throws IOException {
         if (!name.isEmpty()) {
             out.writeByte(0x0A); // TAG_Compound
@@ -841,14 +837,6 @@ public class PluginServer {
         writeNBTStringValue(out, name);
         out.writeByte(elementType);
         out.writeInt(count);
-    }
-
-    private static void writeNBTListStart(DataOutputStream out, String name, int elementType) throws IOException {
-        writeNBTListStartWithCount(out, name, elementType, 1);
-    }
-
-    private static void writeNBTListEnd(DataOutputStream out) throws IOException {
-        // do nothing
     }
 
     // ==================== 发送加入游戏包 ====================
