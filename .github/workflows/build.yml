@@ -24,51 +24,126 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: 'maven'
     
-    - name: Build with Maven
+    - name: Verify project structure
       run: |
-        mvn clean package -DskipTests
-        echo "Maven构建完成"
+        echo "=== 仓库结构 ==="
+        ls -la
+        echo "=== src 目录 ==="
+        ls -la src/ || echo "src目录不存在"
+        echo "=== 检查关键文件 ==="
+        if [ -f "src/PluginServer.java" ]; then
+          echo "✅ src/PluginServer.java 存在"
+        else
+          echo "❌ src/PluginServer.java 不存在"
+          find . -name "*.java" -type f
+          exit 1
+        fi
     
-    - name: List build output
-      run: |
-        echo "构建产物:"
-        ls -la target/*.jar
-    
-    - name: Extract API classes
+    - name: Download Minestom dependencies
       run: |
         mkdir -p lib
-        cd target/classes
-        # 提取插件API接口类
-        jar cf ../../lib/plugin-server-api.jar \
-          PluginServer\$Plugin.class \
-          PluginServer\$CommandExecutor.class \
-          PluginServer\$ServerAPI.class
-        cd ../..
-        echo "API库创建完成"
+        cd lib
+        
+        # 下载Minestom及其依赖
+        echo "下载Minestom依赖..."
+        
+        # Minestom核心
+        curl -L -o minestom.jar "https://repo.minestom.net/repository/maven-public/net/minestom/minestom-snapshots/1.20.4/minestom-snapshots-1.20.4.jar"
+        
+        # 下载依赖库
+        curl -L -o adventure-api.jar "https://repo1.maven.org/maven2/net/kyori/adventure-api/4.14.0/adventure-api-4.14.0.jar"
+        curl -L -o adventure-text-serializer-gson.jar "https://repo1.maven.org/maven2/net/kyori/adventure-text-serializer-gson/4.14.0/adventure-text-serializer-gson-4.14.0.jar"
+        curl -L -o adventure-text-serializer-legacy.jar "https://repo1.maven.org/maven2/net/kyori/adventure-text-serializer-legacy/4.14.0/adventure-text-serializer-legacy-4.14.0.jar"
+        curl -L -o gson.jar "https://repo1.maven.org/maven2/com/google/code/gson/gson/2.10.1/gson-2.10.1.jar"
+        curl -L -o slf4j-api.jar "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.9/slf4j-api-2.0.9.jar"
+        curl -L -o jetbrains-annotations.jar "https://repo1.maven.org/maven2/org/jetbrains/annotations/24.0.0/annotations-24.0.0.jar"
+        
+        cd ..
+        echo "依赖下载完成"
         ls -la lib/
     
-    - name: Rename server JAR
+    - name: Compile PluginServer
       run: |
-        # 找到主JAR文件（不是original的）
-        MAIN_JAR=$(ls target/*.jar | grep -v original | head -1)
-        cp "$MAIN_JAR" mintropy-server.jar
-        echo "服务器JAR: $MAIN_JAR -> mintropy-server.jar"
-        ls -la mintropy-server.jar
+        mkdir -p build
+        echo "编译 PluginServer.java..."
+        
+        # 构建classpath
+        CLASSPATH="lib/*"
+        
+        # 编译
+        javac -encoding UTF-8 -cp "$CLASSPATH" -d build src/PluginServer.java
+        
+        if [ $? -eq 0 ]; then
+          echo "✅ 编译成功"
+        else
+          echo "❌ 编译失败"
+          exit 1
+        fi
+    
+    - name: Create API library
+      run: |
+        cd build
+        echo "提取API接口类..."
+        
+        # 提取插件API接口类
+        jar cf plugin-server-api.jar \
+          PluginServer\$Plugin.class \
+          PluginServer\$CommandExecutor.class \
+          PluginServer\$ServerAPI.class \
+          2>/dev/null || true
+        
+        cd ..
+        mkdir -p release
+        cp build/plugin-server-api.jar release/
+        echo "API库创建完成"
+        ls -la release/
+    
+    - name: Package server JAR
+      run: |
+        cd build
+        echo "打包服务器JAR..."
+        
+        # 创建MANIFEST
+        echo "Main-Class: PluginServer" > MANIFEST.MF
+        echo "Class-Path: ." >> MANIFEST.MF
+        echo "" >> MANIFEST.MF
+        
+        # 打包所有类
+        jar cfm mintropy-server.jar MANIFEST.MF *.class
+        
+        # 添加依赖库
+        echo "添加依赖库..."
+        mkdir -p temp_lib
+        cd temp_lib
+        for jar in ../../lib/*.jar; do
+          jar xf "$jar"
+        done
+        cd ..
+        
+        # 合并依赖到主JAR
+        jar uf mintropy-server.jar -C temp_lib .
+        
+        # 清理
+        rm -rf temp_lib
+        
+        cd ..
+        cp build/mintropy-server.jar release/
+        echo "服务器JAR打包完成"
+        ls -la release/
     
     - name: Upload server JAR
       uses: actions/upload-artifact@v4
       with:
         name: mintropy-server
-        path: mintropy-server.jar
+        path: release/mintropy-server.jar
         retention-days: 90
     
     - name: Upload API library
       uses: actions/upload-artifact@v4
       with:
         name: plugin-server-api
-        path: lib/plugin-server-api.jar
+        path: release/plugin-server-api.jar
         retention-days: 90
     
     - name: Create Release
