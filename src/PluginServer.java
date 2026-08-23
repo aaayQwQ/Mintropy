@@ -1,47 +1,130 @@
-import net.minestom.server.MinecraftServer;
-import net.minestom.server.coordinate.Pos;
-import net.minestom.server.entity.GameMode;
-import net.minestom.server.entity.Player;
-import net.minestom.server.event.GlobalEventHandler;
-import net.minestom.server.event.player.AsyncPlayerConfigurationEvent;
-import net.minestom.server.event.player.PlayerChatEvent;
-import net.minestom.server.event.player.PlayerDisconnectEvent;
-import net.minestom.server.event.player.PlayerLoginEvent;
-import net.minestom.server.event.player.PlayerSpawnEvent;
-import net.minestom.server.event.server.ServerListPingEvent;
-import net.minestom.server.extras.MojangAuth;
-import net.minestom.server.instance.*;
-import net.minestom.server.instance.block.Block;
-import net.minestom.server.ping.ResponseData;
-import net.minestom.server.utils.time.TimeUnit;
-
 import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.jar.*;
 import java.util.logging.*;
+import java.nio.charset.StandardCharsets;
 
 /**
- * Mintropy MC Server - 插件化Minecraft服务器
- * 基于Minestom，支持MC客户端连接和插件扩展
+ * Mintropy MC Server - 纯Java实现的Minecraft服务器
+ * 完全独立，无第三方依赖
+ * 支持MC客户端连接和插件扩展
  * 
- * @version 2.0.0
+ * @version 3.0.0
  */
 public class PluginServer {
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static final String VERSION = "2.0.0";
+    private static final String VERSION = "3.0.0";
     private static final String MC_VERSION = "1.20.4";
+    private static final int PROTOCOL_VERSION = 765;
     private static final int PORT = 25565;
     
     private static final Map<String, Plugin> plugins = new ConcurrentHashMap<>();
     private static final Map<String, PluginClassLoader> classLoaders = new ConcurrentHashMap<>();
     private static final Map<String, CommandExecutor> commands = new ConcurrentHashMap<>();
+    private static final Map<String, MCPlayer> onlinePlayers = new ConcurrentHashMap<>();
     private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
     
-    private static InstanceContainer instanceContainer;
+    private static ServerSocket serverSocket;
     private static ServerAPI serverAPI;
     private static volatile boolean running = false;
+
+    // ============ MC玩家类 ============
+    public static class MCPlayer {
+        private final String username;
+        private final Socket socket;
+        private final DataInputStream input;
+        private final DataOutputStream output;
+        private double x = 0, y = 64, z = 0;
+        private float yaw = 0, pitch = 0;
+        
+        public MCPlayer(String username, Socket socket) throws IOException {
+            this.username = username;
+            this.socket = socket;
+            this.input = new DataInputStream(socket.getInputStream());
+            this.output = new DataOutputStream(socket.getOutputStream());
+        }
+        
+        public String getUsername() { return username; }
+        public double getX() { return x; }
+        public double getY() { return y; }
+        public double getZ() { return z; }
+        
+        public void teleport(double x, double y, double z) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            // 发送传送包
+            sendPlayerPosition();
+        }
+        
+        public void sendMessage(String message) {
+            try {
+                // 发送聊天消息包 (0x65)
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                DataOutputStream packet = new DataOutputStream(buffer);
+                
+                // 包ID (0x65 = System Chat Message)
+                writeVarInt(packet, 0x65);
+                // 消息内容
+                writeString(packet, message);
+                // 消息类型 (0 = SYSTEM)
+                writeVarInt(packet, 0);
+                
+                sendPacket(buffer.toByteArray());
+            } catch (IOException e) {
+                logger.warning("发送消息失败: " + e.getMessage());
+            }
+        }
+        
+        private void sendPlayerPosition() {
+            try {
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                DataOutputStream packet = new DataOutputStream(buffer);
+                
+                // 包ID (0x3E = Synchronize Player Position)
+                writeVarInt(packet, 0x3E);
+                packet.writeDouble(x);
+                packet.writeDouble(y);
+                packet.writeDouble(z);
+                packet.writeFloat(yaw);
+                packet.writeFloat(pitch);
+                packet.writeByte(0); // flags
+                writeVarInt(packet, 0); // teleport ID
+                
+                sendPacket(buffer.toByteArray());
+            } catch (IOException e) {
+                logger.warning("发送位置失败: " + e.getMessage());
+            }
+        }
+        
+        private void sendPacket(byte[] data) throws IOException {
+            synchronized (output) {
+                writeVarInt(output, data.length);
+                output.write(data);
+                output.flush();
+            }
+        }
+        
+        public void disconnect(String reason) {
+            try {
+                // 发送断开包
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                DataOutputStream packet = new DataOutputStream(buffer);
+                writeVarInt(packet, 0x1B); // Disconnect packet
+                writeString(packet, reason);
+                sendPacket(buffer.toByteArray());
+            } catch (IOException e) {
+                // 忽略断开错误
+            } finally {
+                try {
+                    socket.close();
+                } catch (IOException e) {
+                    // 忽略
+                }
+            }
+        }
+    }
 
     // ============ 插件接口 ============
     public interface Plugin {
@@ -54,7 +137,7 @@ public class PluginServer {
     // ============ 命令执行器接口 ============
     @FunctionalInterface
     public interface CommandExecutor {
-        void onCommand(Player player, String[] args);
+        void onCommand(MCPlayer player, String[] args);
     }
 
     // ============ 服务器API接口 ============
@@ -63,10 +146,8 @@ public class PluginServer {
         void broadcastMessage(String message);
         void scheduleTask(Runnable task, long delay);
         Logger getLogger();
-        Collection<Player> getOnlinePlayers();
-        void teleportPlayer(Player player, double x, double y, double z);
-        void setBlock(int x, int y, int z, String blockType);
-        InstanceContainer getMainInstance();
+        Collection<MCPlayer> getOnlinePlayers();
+        void teleportPlayer(MCPlayer player, double x, double y, double z);
     }
 
     // ============ 服务器API实现 ============
@@ -79,9 +160,7 @@ public class PluginServer {
 
         @Override
         public void broadcastMessage(String message) {
-            MinecraftServer.getConnectionManager().getOnlinePlayers().forEach(player -> {
-                player.sendMessage(message);
-            });
+            onlinePlayers.values().forEach(player -> player.sendMessage(message));
             logger.info("[广播] " + message);
         }
 
@@ -96,26 +175,13 @@ public class PluginServer {
         }
 
         @Override
-        public Collection<Player> getOnlinePlayers() {
-            return MinecraftServer.getConnectionManager().getOnlinePlayers();
+        public Collection<MCPlayer> getOnlinePlayers() {
+            return onlinePlayers.values();
         }
 
         @Override
-        public void teleportPlayer(Player player, double x, double y, double z) {
-            player.teleport(new Pos(x, y, z));
-        }
-
-        @Override
-        public void setBlock(int x, int y, int z, String blockType) {
-            Block block = Block.fromNamespaceId(blockType);
-            if (block != null) {
-                instanceContainer.setBlock(x, y, z, block);
-            }
-        }
-
-        @Override
-        public InstanceContainer getMainInstance() {
-            return instanceContainer;
+        public void teleportPlayer(MCPlayer player, double x, double y, double z) {
+            player.teleport(x, y, z);
         }
     }
 
@@ -145,37 +211,15 @@ public class PluginServer {
     public static void main(String[] args) {
         printBanner();
         
-        // 初始化Minecraft服务器
-        MinecraftServer minecraftServer = MinecraftServer.init();
-        
-        // 创建世界实例
-        InstanceManager instanceManager = MinecraftServer.getInstanceManager();
-        instanceContainer = instanceManager.createInstanceContainer();
-        
-        // 设置世界生成器（平地世界）
-        instanceContainer.setGenerator(unit -> {
-            unit.modifier().fillHeight(0, 1, Block.GRASS_BLOCK);
-            unit.modifier().fillHeight(1, 40, Block.STONE);
-        });
-        
         // 初始化服务器API
         serverAPI = new ServerAPIImpl();
-        
-        // 注册事件
-        registerEvents();
         
         // 加载插件
         loadPlugins("plugins");
         enableAllPlugins();
         
-        // 启动服务器
-        minecraftServer.start("0.0.0.0", PORT);
-        running = true;
-        
-        logger.info("Mintropy MC 服务器启动完成！");
-        logger.info("MC版本: " + MC_VERSION);
-        logger.info("端口: " + PORT);
-        logger.info("输入 'help' 查看可用命令");
+        // 启动MC服务器
+        startMCServer();
         
         // 添加关闭钩子
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -199,100 +243,307 @@ public class PluginServer {
         }
     }
 
-    // ============ 注册MC事件 ============
-    private static void registerEvents() {
-        GlobalEventHandler globalEventHandler = MinecraftServer.getGlobalEventHandler();
-        
-        // 服务器列表Ping事件
-        globalEventHandler.addListener(ServerListPingEvent.class, event -> {
-            ResponseData responseData = event.getResponseData();
-            responseData.setDescription("§a§lMintropy Server §r§7- 插件化MC服务器");
-            responseData.setMaxPlayer(100);
-            responseData.setOnline(MinecraftServer.getConnectionManager().getOnlinePlayers().size());
-            responseData.setVersion("1.20.4");
-        });
-        
-        // 玩家配置事件
-        globalEventHandler.addListener(AsyncPlayerConfigurationEvent.class, event -> {
-            event.setSpawningInstance(instanceContainer);
-            Player player = event.getPlayer();
-            player.setRespawnPoint(new Pos(0, 42, 0));
-        });
-        
-        // 玩家登录事件
-        globalEventHandler.addListener(PlayerLoginEvent.class, event -> {
-            Player player = event.getPlayer();
-            logger.info("玩家登录: " + player.getUsername());
-            broadcastToConsole("§e" + player.getUsername() + " §a加入了服务器");
-        });
-        
-        // 玩家生成事件
-        globalEventHandler.addListener(PlayerSpawnEvent.class, event -> {
-            Player player = event.getPlayer();
-            player.setGameMode(GameMode.CREATIVE);
-            player.teleport(new Pos(0, 42, 0));
-            player.sendMessage("§a§l欢迎来到 §e§lMintropy §a§l服务器！");
-            player.sendMessage("§7使用 §e/help §7查看可用命令");
-        });
-        
-        // 玩家聊天事件
-        globalEventHandler.addListener(PlayerChatEvent.class, event -> {
-            Player player = event.getPlayer();
-            String message = event.getMessage();
+    // ============ 启动MC服务器 ============
+    private static void startMCServer() {
+        try {
+            serverSocket = new ServerSocket(PORT);
+            running = true;
             
-            // 检查是否是命令
-            if (message.startsWith("/")) {
-                event.setCancelled(true);
-                handlePlayerCommand(player, message.substring(1));
-                return;
-            }
+            logger.info("Mintropy MC 服务器启动完成！");
+            logger.info("MC版本: " + MC_VERSION);
+            logger.info("端口: " + PORT);
+            logger.info("等待客户端连接...");
+            logger.info("输入 'help' 查看可用命令");
             
-            // 广播聊天消息
-            String formattedMessage = "§7<§f" + player.getUsername() + "§7> §f" + message;
-            MinecraftServer.getConnectionManager().getOnlinePlayers().forEach(p -> {
-                p.sendMessage(formattedMessage);
+            // 接受客户端连接
+            Thread acceptThread = new Thread(() -> {
+                while (running) {
+                    try {
+                        Socket clientSocket = serverSocket.accept();
+                        handleClientConnection(clientSocket);
+                    } catch (IOException e) {
+                        if (running) {
+                            logger.warning("接受连接失败: " + e.getMessage());
+                        }
+                    }
+                }
             });
-            logger.info("[聊天] " + player.getUsername() + ": " + message);
-        });
-        
-        // 玩家断开连接
-        globalEventHandler.addListener(PlayerDisconnectEvent.class, event -> {
-            Player player = event.getPlayer();
-            logger.info("玩家断开: " + player.getUsername());
-            broadcastToConsole("§e" + player.getUsername() + " §c离开了服务器");
-        });
+            acceptThread.setDaemon(true);
+            acceptThread.setName("AcceptThread");
+            acceptThread.start();
+            
+        } catch (IOException e) {
+            logger.severe("启动MC服务器失败: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
-    // ============ 广播到控制台 ============
-    private static void broadcastToConsole(String message) {
-        logger.info(message.replaceAll("§[0-9a-fk-or]", ""));
-        MinecraftServer.getConnectionManager().getOnlinePlayers().forEach(p -> {
-            p.sendMessage(message);
+    // ============ 处理客户端连接 ============
+    private static void handleClientConnection(Socket socket) {
+        Thread clientThread = new Thread(() -> {
+            try {
+                DataInputStream input = new DataInputStream(socket.getInputStream());
+                DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+                
+                // 读取握手包
+                int packetLength = readVarInt(input);
+                byte[] packetData = new byte[packetLength];
+                input.readFully(packetData);
+                
+                DataInputStream packet = new DataInputStream(new ByteArrayInputStream(packetData));
+                int packetId = readVarInt(packet);
+                
+                if (packetId != 0x00) {
+                    logger.warning("期望握手包，收到: 0x" + Integer.toHexString(packetId));
+                    socket.close();
+                    return;
+                }
+                
+                // 解析握手包
+                int protocolVersion = readVarInt(packet);
+                String serverAddress = readString(packet);
+                int serverPort = packet.readUnsignedShort();
+                int nextState = readVarInt(packet);
+                
+                logger.info("握手: 协议=" + protocolVersion + ", 地址=" + serverAddress + ", 状态=" + nextState);
+                
+                if (nextState == 1) {
+                    // Status请求
+                    handleStatusRequest(input, output);
+                } else if (nextState == 2) {
+                    // Login请求
+                    handleLoginRequest(socket, input, output);
+                } else {
+                    socket.close();
+                }
+                
+            } catch (Exception e) {
+                logger.warning("处理客户端连接失败: " + e.getMessage());
+                try {
+                    socket.close();
+                } catch (IOException ex) {
+                    // 忽略
+                }
+            }
         });
+        clientThread.setDaemon(true);
+        clientThread.setName("ClientThread");
+        clientThread.start();
+    }
+
+    // ============ 处理状态请求 ============
+    private static void handleStatusRequest(DataInputStream input, DataOutputStream output) throws IOException {
+        // 读取状态请求包
+        int packetLength = readVarInt(input);
+        byte[] packetData = new byte[packetLength];
+        input.readFully(packetData);
+        
+        // 发送状态响应
+        String statusJson = "{\"version\":{\"name\":\"" + MC_VERSION + "\",\"protocol\":" + PROTOCOL_VERSION + "}," +
+                           "\"players\":{\"max\":100,\"online\":" + onlinePlayers.size() + "}," +
+                           "\"description\":{\"text\":\"§a§lMintropy Server\"}}";
+        
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        DataOutputStream packet = new DataOutputStream(buffer);
+        writeVarInt(packet, 0x00); // Status Response
+        writeString(packet, statusJson);
+        
+        writeVarInt(output, buffer.size());
+        output.write(buffer.toByteArray());
+        output.flush();
+        
+        // 等待Ping
+        packetLength = readVarInt(input);
+        packetData = new byte[packetLength];
+        input.readFully(packetData);
+        
+        // 发送Pong
+        buffer = new ByteArrayOutputStream();
+        packet = new DataOutputStream(buffer);
+        writeVarInt(packet, 0x01); // Pong
+        packet.write(packetData); // Echo back
+        
+        writeVarInt(output, buffer.size());
+        output.write(buffer.toByteArray());
+        output.flush();
+    }
+
+    // ============ 处理登录请求 ============
+    private static void handleLoginRequest(Socket socket, DataInputStream input, DataOutputStream output) throws IOException {
+        // 读取登录开始包
+        int packetLength = readVarInt(input);
+        byte[] packetData = new byte[packetLength];
+        input.readFully(packetData);
+        
+        DataInputStream packet = new DataInputStream(new ByteArrayInputStream(packetData));
+        int packetId = readVarInt(packet);
+        
+        if (packetId != 0x00) {
+            logger.warning("期望登录开始包");
+            socket.close();
+            return;
+        }
+        
+        String username = readString(packet);
+        logger.info("玩家登录: " + username);
+        
+        // 发送登录成功包
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        DataOutputStream response = new DataOutputStream(buffer);
+        writeVarInt(response, 0x02); // Login Success
+        writeString(response, java.util.UUID.randomUUID().toString());
+        writeString(response, username);
+        
+        writeVarInt(output, buffer.size());
+        output.write(buffer.toByteArray());
+        output.flush();
+        
+        // 创建玩家对象
+        MCPlayer player = new MCPlayer(username, socket);
+        onlinePlayers.put(username, player);
+        
+        // 发送加入游戏包
+        sendJoinGame(output);
+        
+        // 发送玩家位置
+        sendPlayerPositionAndLook(output);
+        
+        logger.info("玩家 " + username + " 已加入游戏！");
+        serverAPI.broadcastMessage("§e" + username + " §a加入了服务器");
+        
+        // 处理游戏内数据包
+        handleGamePackets(player);
+    }
+
+    // ============ 发送加入游戏包 ============
+    private static void sendJoinGame(DataOutputStream output) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        DataOutputStream packet = new DataOutputStream(buffer);
+        
+        writeVarInt(packet, 0x2B); // Join Game
+        packet.writeInt(0); // Entity ID
+        packet.writeBoolean(false); // Is hardcore
+        packet.writeByte(1); // Gamemode (Creative)
+        packet.writeByte(-1); // Previous gamemode
+        writeVarInt(packet, 1); // Dimension count
+        writeString(packet, "minecraft:overworld"); // Dimension name
+        writeString(packet, "minecraft:overworld"); // Dimension type
+        writeString(packet, "minecraft:overworld"); // World name
+        packet.writeLong(0); // Hashed seed
+        packet.writeByte(100); // Max players
+        writeVarInt(packet, 10); // View distance
+        writeVarInt(packet, 10); // Simulation distance
+        packet.writeBoolean(false); // Reduced debug info
+        packet.writeBoolean(true); // Enable respawn screen
+        packet.writeBoolean(false); // Is debug
+        packet.writeBoolean(false); // Is flat
+        packet.writeBoolean(false); // Has death location
+        
+        writeVarInt(output, buffer.size());
+        output.write(buffer.toByteArray());
+        output.flush();
+    }
+
+    // ============ 发送玩家位置 ============
+    private static void sendPlayerPositionAndLook(DataOutputStream output) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        DataOutputStream packet = new DataOutputStream(buffer);
+        
+        writeVarInt(packet, 0x3E); // Synchronize Player Position
+        packet.writeDouble(0); // X
+        packet.writeDouble(64); // Y
+        packet.writeDouble(0); // Z
+        packet.writeFloat(0); // Yaw
+        packet.writeFloat(0); // Pitch
+        packet.writeByte(0); // Flags
+        writeVarInt(packet, 0); // Teleport ID
+        
+        writeVarInt(output, buffer.size());
+        output.write(buffer.toByteArray());
+        output.flush();
+    }
+
+    // ============ 处理游戏内数据包 ============
+    private static void handleGamePackets(MCPlayer player) {
+        try {
+            DataInputStream input = player.input;
+            
+            while (running && !player.socket.isClosed()) {
+                int packetLength = readVarInt(input);
+                byte[] packetData = new byte[packetLength];
+                input.readFully(packetData);
+                
+                DataInputStream packet = new DataInputStream(new ByteArrayInputStream(packetData));
+                int packetId = readVarInt(packet);
+                
+                switch (packetId) {
+                    case 0x05: // Chat Message
+                        String message = readString(packet);
+                        handlePlayerChat(player, message);
+                        break;
+                        
+                    case 0x1A: // Player Position
+                        player.x = packet.readDouble();
+                        player.y = packet.readDouble();
+                        player.z = packet.readDouble();
+                        break;
+                        
+                    case 0x1B: // Player Rotation
+                        player.yaw = packet.readFloat();
+                        player.pitch = packet.readFloat();
+                        break;
+                        
+                    case 0x1C: // Player Position and Rotation
+                        player.x = packet.readDouble();
+                        player.y = packet.readDouble();
+                        player.z = packet.readDouble();
+                        player.yaw = packet.readFloat();
+                        player.pitch = packet.readFloat();
+                        break;
+                        
+                    default:
+                        // 忽略其他包
+                        break;
+                }
+            }
+        } catch (IOException e) {
+            // 玩家断开连接
+            onlinePlayers.remove(player.getUsername());
+            logger.info("玩家 " + player.getUsername() + " 断开连接");
+            serverAPI.broadcastMessage("§e" + player.getUsername() + " §c离开了服务器");
+        }
+    }
+
+    // ============ 处理玩家聊天 ============
+    private static void handlePlayerChat(MCPlayer player, String message) {
+        if (message.startsWith("/")) {
+            handlePlayerCommand(player, message.substring(1));
+        } else {
+            String formattedMessage = "§7<§f" + player.getUsername() + "§7> §f" + message;
+            serverAPI.broadcastMessage(formattedMessage);
+            logger.info("[聊天] " + player.getUsername() + ": " + message);
+        }
     }
 
     // ============ 处理玩家命令 ============
-    private static void handlePlayerCommand(Player player, String commandLine) {
+    private static void handlePlayerCommand(MCPlayer player, String commandLine) {
         String[] parts = commandLine.split("\\s+");
         String command = parts[0].toLowerCase();
         String[] args = Arrays.copyOfRange(parts, 1, parts.length);
         
-        // 检查插件命令
         CommandExecutor executor = commands.get(command);
         if (executor != null) {
             try {
                 executor.onCommand(player, args);
             } catch (Exception e) {
                 player.sendMessage("§c命令执行错误: " + e.getMessage());
-                logger.severe("命令执行失败: " + command + " - " + e.getMessage());
             }
             return;
         }
         
-        // 内置命令
         switch (command) {
             case "spawn":
-                player.teleport(new Pos(0, 42, 0));
+                player.teleport(0, 64, 0);
                 player.sendMessage("§a已传送到出生点！");
                 break;
                 
@@ -372,15 +623,15 @@ public class PluginServer {
 
     // ============ 列出在线玩家 ============
     private static void listPlayers() {
-        Collection<Player> players = MinecraftServer.getConnectionManager().getOnlinePlayers();
-        if (players.isEmpty()) {
+        if (onlinePlayers.isEmpty()) {
             logger.info("当前没有在线玩家");
             return;
         }
         
-        logger.info("在线玩家 (" + players.size() + "):");
-        players.forEach(player -> 
-            logger.info("  • " + player.getUsername() + " @ " + player.getPosition())
+        logger.info("在线玩家 (" + onlinePlayers.size() + "):");
+        onlinePlayers.values().forEach(player -> 
+            logger.info("  • " + player.getUsername() + " @ (" + 
+                       player.getX() + ", " + player.getY() + ", " + player.getZ() + ")")
         );
     }
 
@@ -421,16 +672,6 @@ public class PluginServer {
                 new URL[]{jarFile.toURI().toURL()},
                 PluginServer.class.getClassLoader()
             );
-            
-            // 检查是否是Bukkit插件
-            try {
-                classLoader.loadClass("org.bukkit.plugin.java.JavaPlugin");
-                logger.warning("跳过Bukkit插件: " + jarFile.getName());
-                classLoader.close();
-                return;
-            } catch (ClassNotFoundException e) {
-                // 不是Bukkit插件
-            }
             
             Class<?> pluginClass;
             try {
@@ -558,13 +799,17 @@ public class PluginServer {
         disableAllPlugins();
         scheduler.shutdown();
         
+        // 断开所有玩家
+        onlinePlayers.values().forEach(player -> player.disconnect("§c服务器关闭"));
+        onlinePlayers.clear();
+        
+        // 关闭服务器Socket
         try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                serverSocket.close();
             }
-        } catch (InterruptedException e) {
-            scheduler.shutdownNow();
-            Thread.currentThread().interrupt();
+        } catch (IOException e) {
+            logger.warning("关闭服务器Socket失败: " + e.getMessage());
         }
         
         classLoaders.values().forEach(loader -> {
@@ -575,8 +820,50 @@ public class PluginServer {
             }
         });
         
-        MinecraftServer.stopCleanly();
         logger.info("服务器已关闭");
+    }
+
+    // ============ 工具方法 ============
+    private static int readVarInt(DataInputStream input) throws IOException {
+        int result = 0;
+        int position = 0;
+        byte currentByte;
+        
+        do {
+            currentByte = input.readByte();
+            result |= (currentByte & 0x7F) << position;
+            position += 7;
+            
+            if (position >= 32) {
+                throw new IOException("VarInt too big");
+            }
+        } while ((currentByte & 0x80) != 0);
+        
+        return result;
+    }
+
+    private static void writeVarInt(DataOutputStream output, int value) throws IOException {
+        do {
+            byte temp = (byte) (value & 0x7F);
+            value >>>= 7;
+            if (value != 0) {
+                temp |= 0x80;
+            }
+            output.writeByte(temp);
+        } while (value != 0);
+    }
+
+    private static String readString(DataInputStream input) throws IOException {
+        int length = readVarInt(input);
+        byte[] bytes = new byte[length];
+        input.readFully(bytes);
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private static void writeString(DataOutputStream output, String string) throws IOException {
+        byte[] bytes = string.getBytes(StandardCharsets.UTF_8);
+        writeVarInt(output, bytes.length);
+        output.write(bytes);
     }
 
     // ============ 列出所有插件 ============
@@ -607,7 +894,7 @@ public class PluginServer {
     private static void printBanner() {
         System.out.println("=================================");
         System.out.println("   Mintropy MC Server v" + VERSION);
-        System.out.println("   插件化Minecraft服务器");
+        System.out.println("   纯Java实现的Minecraft服务器");
         System.out.println("   MC版本: " + MC_VERSION);
         System.out.println("=================================");
         System.out.flush();
