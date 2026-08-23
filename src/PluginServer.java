@@ -10,25 +10,23 @@ import java.util.jar.JarEntry;
 
 /**
  * Mintropy MC Server - 纯Java高性能Minecraft服务器
- * 兼容 Minecraft 1.20.1
- * 完整实现配置阶段，使用最小注册表数据
+ * 兼容 Minecraft 1.8.8 (协议47)
  * 无正版验证，性能优先
  * 
- * @version 6.3.0
+ * @version 7.0.0
  */
 public class PluginServer {
 
     // ==================== 服务器基本信息 ====================
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "6.3.0";
-    private static String MC_VERSION = "1.20.1";
-    private static int PROTOCOL_VERSION = 763;
+    private static String VERSION = "7.0.0";
+    private static String MC_VERSION = "1.8.8";
+    private static int PROTOCOL_VERSION = 47;
     private static int PORT = 25565;
     private static String SERVER_NAME = "Mintropy";
     private static int MAX_PLAYERS = 100;
-    private static String MOTD = "Mintropy";
+    private static String MOTD = "Mintropy Server";
     private static int VIEW_DISTANCE = 8;
-    private static int SIMULATION_DISTANCE = 8;
 
     // ==================== 核心集合 ====================
     private static final Map<String, Plugin> plugins = new ConcurrentHashMap<>();
@@ -228,7 +226,7 @@ public class PluginServer {
         private final DataInputStream input;
         private final DataOutputStream output;
 
-        private double x = 0, y = 65, z = 0;
+        private double x = 0, y = 64, z = 0;
         private float yaw = 0, pitch = 0;
         private boolean onGround = true;
 
@@ -259,7 +257,7 @@ public class PluginServer {
             this.x = x;
             this.y = y;
             this.z = z;
-            sendPlayerPosition();
+            sendPlayerPositionAndLook();
         }
 
         public void sendMessage(String message) {
@@ -269,9 +267,8 @@ public class PluginServer {
                 }
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                 DataOutputStream packet = new DataOutputStream(buffer);
-                writeVarInt(packet, 0x65); // System Chat Message
+                writeVarInt(packet, 0x02); // Chat Message (clientbound)
                 writeString(packet, message);
-                writeVarInt(packet, 0);
                 sendPacket(buffer.toByteArray());
             } catch (IOException e) {
                 // ignore
@@ -290,18 +287,17 @@ public class PluginServer {
             }
         }
 
-        private void sendPlayerPosition() {
+        private void sendPlayerPositionAndLook() {
             try {
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                 DataOutputStream packet = new DataOutputStream(buffer);
-                writeVarInt(packet, 0x3E); // Synchronize Player Position
+                writeVarInt(packet, 0x08); // Player Position And Look (clientbound)
                 packet.writeDouble(x);
                 packet.writeDouble(y);
                 packet.writeDouble(z);
                 packet.writeFloat(yaw);
                 packet.writeFloat(pitch);
-                packet.writeByte(0);
-                writeVarInt(packet, 0);
+                packet.writeByte(0); // flags
                 sendPacket(buffer.toByteArray());
             } catch (IOException e) {
                 // ignore
@@ -321,7 +317,7 @@ public class PluginServer {
                 if (reason.length() > 50) reason = reason.substring(0, 50);
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                 DataOutputStream packet = new DataOutputStream(buffer);
-                writeVarInt(packet, 0x1B);
+                writeVarInt(packet, 0x40); // Disconnect (clientbound)
                 writeString(packet, reason);
                 sendPacket(buffer.toByteArray());
             } catch (IOException e) {
@@ -450,8 +446,8 @@ public class PluginServer {
                 try {
                     ByteArrayOutputStream buffer = new ByteArrayOutputStream();
                     DataOutputStream packet = new DataOutputStream(buffer);
-                    writeVarInt(packet, 0x21); // Keep Alive (clientbound)
-                    packet.writeLong(System.currentTimeMillis());
+                    writeVarInt(packet, 0x00); // Keep Alive (clientbound)
+                    packet.writeInt(0); // random ID
                     player.sendPacket(buffer.toByteArray());
                 } catch (IOException e) {
                     // ignore
@@ -481,9 +477,8 @@ public class PluginServer {
                 defaultConfig.setProperty("server-name", "Mintropy");
                 defaultConfig.setProperty("server-port", "25565");
                 defaultConfig.setProperty("max-players", "100");
-                defaultConfig.setProperty("motd", "Mintropy");
+                defaultConfig.setProperty("motd", "Mintropy Server");
                 defaultConfig.setProperty("view-distance", "8");
-                defaultConfig.setProperty("simulation-distance", "8");
                 defaultConfig.setProperty("world-name", "MintropyWorld");
                 defaultConfig.store(output, "Mintropy Server Configuration");
             } catch (IOException e) {
@@ -497,10 +492,9 @@ public class PluginServer {
             SERVER_NAME = serverConfig.getProperty("server-name", "Mintropy");
             PORT = Integer.parseInt(serverConfig.getProperty("server-port", "25565"));
             MAX_PLAYERS = Integer.parseInt(serverConfig.getProperty("max-players", "100"));
-            MOTD = serverConfig.getProperty("motd", "Mintropy");
+            MOTD = serverConfig.getProperty("motd", "Mintropy Server");
             if (MOTD.length() > 48) MOTD = MOTD.substring(0, 48);
             VIEW_DISTANCE = Integer.parseInt(serverConfig.getProperty("view-distance", "8"));
-            SIMULATION_DISTANCE = Integer.parseInt(serverConfig.getProperty("simulation-distance", "8"));
             logger.info("配置文件加载完成");
             logger.info("服务器名称: " + SERVER_NAME);
             logger.info("端口: " + PORT);
@@ -567,17 +561,16 @@ public class PluginServer {
                 DataInputStream input = new DataInputStream(socket.getInputStream());
                 DataOutputStream output = new DataOutputStream(socket.getOutputStream());
 
+                // 读取握手包
                 int packetLength = readVarInt(input);
                 byte[] packetData = new byte[packetLength];
                 input.readFully(packetData);
                 DataInputStream packet = new DataInputStream(new ByteArrayInputStream(packetData));
                 int packetId = readVarInt(packet);
-
                 if (packetId != 0x00) {
                     socket.close();
                     return;
                 }
-
                 int protocolVersion = readVarInt(packet);
                 String serverAddress = readString(packet, 255);
                 int serverPort = packet.readUnsignedShort();
@@ -598,6 +591,7 @@ public class PluginServer {
 
     // ==================== 处理状态请求 ====================
     private static void handleStatusRequest(DataInputStream input, DataOutputStream output) throws IOException {
+        // 读取请求包 (0x00)
         int packetLength = readVarInt(input);
         byte[] packetData = new byte[packetLength];
         input.readFully(packetData);
@@ -609,27 +603,28 @@ public class PluginServer {
 
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x00);
+        writeVarInt(packet, 0x00); // Status Response
         writeString(packet, statusJson);
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
         output.flush();
 
+        // 等待Ping (0x01)
         packetLength = readVarInt(input);
         packetData = new byte[packetLength];
         input.readFully(packetData);
         buffer = new ByteArrayOutputStream();
         packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x01);
-        packet.write(packetData);
+        writeVarInt(packet, 0x01); // Pong
+        packet.write(packetData); // echo back
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
         output.flush();
     }
 
-    // ==================== 处理登录请求（含配置阶段） ====================
+    // ==================== 处理登录请求 ====================
     private static void handleLoginRequest(Socket socket, DataInputStream input, DataOutputStream output) throws IOException {
-        // 读取 Login Start
+        // 读取 Login Start (0x00)
         int packetLength = readVarInt(input);
         byte[] packetData = new byte[packetLength];
         input.readFully(packetData);
@@ -642,7 +637,7 @@ public class PluginServer {
         String username = readString(packet, 16);
         String playerUUID = "00000000-0000-0000-0000-000000000001";
 
-        // 发送 Login Success
+        // 发送 Login Success (0x02)
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream response = new DataOutputStream(buffer);
         writeVarInt(response, 0x02);
@@ -652,250 +647,102 @@ public class PluginServer {
         output.write(buffer.toByteArray());
         output.flush();
 
-        // 等待客户端 Login Acknowledged (0x03)
-        packetLength = readVarInt(input);
-        packetData = new byte[packetLength];
-        input.readFully(packetData);
-        // 忽略内容
-
-        // 发送配置阶段包
-        sendRegistryData(output);
-        sendUpdateTags(output);
-        sendFinishConfiguration(output);
-
-        // 等待客户端 Acknowledge Finish Configuration (0x03)
-        packetLength = readVarInt(input);
-        packetData = new byte[packetLength];
-        input.readFully(packetData);
-
-        // 创建玩家对象
+        // 1.8.8 不需要等待客户端确认，直接发送游戏加入包
         MCPlayer player = new MCPlayer(username, playerUUID, socket);
         onlinePlayers.put(username, player);
 
-        // 发送游戏加入包
+        // 发送 Join Game (0x01)
         sendJoinGame(output);
+
+        // 发送 Spawn Position (0x05)
+        sendSpawnPosition(output);
+
+        // 发送 Player Position And Look (0x08)
         sendPlayerPositionAndLook(output);
+
+        // 发送 Player Abilities (0x39)
         sendPlayerAbilities(output);
+
+        // 发送空区块 (0x21) 以让客户端加载世界
+        sendEmptyChunk(output);
 
         logger.info("玩家 " + username + " 已加入游戏！");
         handleGamePackets(player);
     }
 
-    // ==================== 配置阶段发送函数 ====================
-    private static void sendRegistryData(DataOutputStream output) throws IOException {
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        DataOutputStream packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x07); // Registry Data
-
-        // 构建最小注册表 NBT
-        writeRegistryNBT(packet);
-
-        writeVarInt(output, buffer.size());
-        output.write(buffer.toByteArray());
-        output.flush();
-    }
-
-    private static void sendUpdateTags(DataOutputStream output) throws IOException {
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        DataOutputStream packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x09); // Update Tags
-        writeVarInt(packet, 0); // 标签组数量 0
-        writeVarInt(output, buffer.size());
-        output.write(buffer.toByteArray());
-        output.flush();
-    }
-
-    private static void sendFinishConfiguration(DataOutputStream output) throws IOException {
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        DataOutputStream packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x03); // Finish Configuration
-        writeVarInt(output, buffer.size());
-        output.write(buffer.toByteArray());
-        output.flush();
-    }
-
-    // ==================== 注册表 NBT 构建 ====================
-    private static void writeRegistryNBT(DataOutputStream out) throws IOException {
-        // 根复合标签
-        writeNBTCompoundStart(out, "");
-
-        // --- dimension_type 注册表 ---
-        writeNBTCompoundStart(out, "minecraft:dimension_type");
-        writeNBTString(out, "type", "minecraft:dimension_type");
-        writeNBTListStartWithCount(out, "value", 10, 1); // 一个元素
-        // 条目：minecraft:overworld
-        writeNBTCompoundStart(out, "");
-        writeNBTString(out, "name", "minecraft:overworld");
-        writeNBTInt(out, "id", 0);
-        writeNBTCompoundStart(out, "element");
-        writeNBTLong(out, "fixed_time", 6000L);
-        writeNBTBool(out, "has_skylight", true);
-        writeNBTBool(out, "has_ceiling", false);
-        writeNBTByte(out, "ultrawarm", (byte)0);
-        writeNBTByte(out, "natural", (byte)1);
-        writeNBTDouble(out, "coordinate_scale", 1.0);
-        writeNBTByte(out, "bed_works", (byte)1);
-        writeNBTByte(out, "respawn_anchor_works", (byte)0);
-        writeNBTInt(out, "min_y", -64);
-        writeNBTInt(out, "height", 384);
-        writeNBTInt(out, "logical_height", 384);
-        writeNBTString(out, "infiniburn", "#minecraft:infiniburn_overworld");
-        writeNBTString(out, "effects", "minecraft:overworld");
-        writeNBTByte(out, "ambient_light", (byte)0);
-        writeNBTByte(out, "piglin_safe", (byte)0);
-        writeNBTBool(out, "has_raids", true);
-        writeNBTInt(out, "monster_spawn_light_level", 0);
-        writeNBTInt(out, "monster_spawn_block_light_limit", 0);
-        writeNBTCompoundEnd(out);
-        writeNBTCompoundEnd(out);
-        writeNBTCompoundEnd(out); // 结束 dimension_type 注册表复合标签
-
-        // --- worldgen/biome 注册表 ---
-        writeNBTCompoundStart(out, "minecraft:worldgen/biome");
-        writeNBTString(out, "type", "minecraft:worldgen/biome");
-        writeNBTListStartWithCount(out, "value", 10, 1);
-        // 条目：minecraft:plains
-        writeNBTCompoundStart(out, "");
-        writeNBTString(out, "name", "minecraft:plains");
-        writeNBTInt(out, "id", 0);
-        writeNBTCompoundStart(out, "element");
-        writeNBTString(out, "precipitation", "rain");
-        writeNBTByte(out, "temperature", (byte)0);
-        writeNBTByte(out, "downfall", (byte)0);
-        writeNBTCompoundStart(out, "effects");
-        writeNBTInt(out, "sky_color", 7907327);
-        writeNBTInt(out, "water_fog_color", 329011);
-        writeNBTInt(out, "fog_color", 12638463);
-        writeNBTInt(out, "water_color", 4159204);
-        writeNBTCompoundEnd(out);
-        writeNBTCompoundEnd(out);
-        writeNBTCompoundEnd(out);
-        writeNBTCompoundEnd(out); // 结束 worldgen/biome 注册表复合标签
-
-        // 根复合标签结束
-        writeNBTCompoundEnd(out);
-    }
-
-    // ==================== NBT 写入辅助方法 ====================
-    private static void writeNBTCompoundStart(DataOutputStream out, String name) throws IOException {
-        if (!name.isEmpty()) {
-            out.writeByte(0x0A); // TAG_Compound
-            writeNBTStringValue(out, name);
-        } else {
-            out.writeByte(0x0A);
-        }
-    }
-
-    private static void writeNBTCompoundEnd(DataOutputStream out) throws IOException {
-        out.writeByte(0x00); // TAG_End
-    }
-
-    private static void writeNBTString(DataOutputStream out, String name, String value) throws IOException {
-        out.writeByte(0x08); // TAG_String
-        writeNBTStringValue(out, name);
-        writeNBTStringValue(out, value);
-    }
-
-    private static void writeNBTStringValue(DataOutputStream out, String value) throws IOException {
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        out.writeShort(bytes.length);
-        out.write(bytes);
-    }
-
-    private static void writeNBTInt(DataOutputStream out, String name, int value) throws IOException {
-        out.writeByte(0x03); // TAG_Int
-        writeNBTStringValue(out, name);
-        out.writeInt(value);
-    }
-
-    private static void writeNBTLong(DataOutputStream out, String name, long value) throws IOException {
-        out.writeByte(0x04); // TAG_Long
-        writeNBTStringValue(out, name);
-        out.writeLong(value);
-    }
-
-    private static void writeNBTBool(DataOutputStream out, String name, boolean value) throws IOException {
-        out.writeByte(0x01); // TAG_Byte
-        writeNBTStringValue(out, name);
-        out.writeByte(value ? 1 : 0);
-    }
-
-    private static void writeNBTByte(DataOutputStream out, String name, byte value) throws IOException {
-        out.writeByte(0x01); // TAG_Byte
-        writeNBTStringValue(out, name);
-        out.writeByte(value);
-    }
-
-    private static void writeNBTDouble(DataOutputStream out, String name, double value) throws IOException {
-        out.writeByte(0x06); // TAG_Double
-        writeNBTStringValue(out, name);
-        out.writeDouble(value);
-    }
-
-    private static void writeNBTListStartWithCount(DataOutputStream out, String name, int elementType, int count) throws IOException {
-        out.writeByte(0x09); // TAG_List
-        writeNBTStringValue(out, name);
-        out.writeByte(elementType);
-        out.writeInt(count);
-    }
-
-    // ==================== 发送加入游戏包 ====================
+    // ==================== 发送 Join Game (0x01) ====================
     private static void sendJoinGame(DataOutputStream output) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
-
-        writeVarInt(packet, 0x2B);
-        packet.writeInt(0);
-        packet.writeBoolean(false);
-        packet.writeByte(1);
-        packet.writeByte(-1);
-        writeVarInt(packet, 1);
-        writeString(packet, "minecraft:overworld");
-        packet.writeByte(0x0A); // TAG_Compound
-        packet.writeShort(0);
-        packet.writeByte(0x00);
-        writeString(packet, "minecraft:overworld");
-        writeString(packet, "world");
-        packet.writeLong(0);
-        writeVarInt(packet, MAX_PLAYERS);
-        writeVarInt(packet, VIEW_DISTANCE);
-        writeVarInt(packet, SIMULATION_DISTANCE);
-        packet.writeBoolean(false);
-        packet.writeBoolean(true);
-        packet.writeBoolean(false);
-        packet.writeBoolean(false);
-        packet.writeBoolean(false);
-
+        writeVarInt(packet, 0x01);
+        packet.writeInt(0); // Entity ID
+        packet.writeByte(1); // Gamemode (creative)
+        packet.writeByte(0); // Dimension (overworld)
+        packet.writeByte(0); // Difficulty (peaceful)
+        packet.writeByte(MAX_PLAYERS); // Max players
+        writeString(packet, "flat"); // Level type
+        packet.writeBoolean(false); // Reduced debug info
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
         output.flush();
     }
 
-    // ==================== 发送玩家位置 ====================
+    // ==================== 发送 Spawn Position (0x05) ====================
+    private static void sendSpawnPosition(DataOutputStream output) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        DataOutputStream packet = new DataOutputStream(buffer);
+        writeVarInt(packet, 0x05);
+        packet.writeInt(0); // X
+        packet.writeInt(64); // Y
+        packet.writeInt(0); // Z
+        writeVarInt(output, buffer.size());
+        output.write(buffer.toByteArray());
+        output.flush();
+    }
+
+    // ==================== 发送 Player Position And Look (0x08) ====================
     private static void sendPlayerPositionAndLook(DataOutputStream output) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x3E);
-        packet.writeDouble(0);
-        packet.writeDouble(65);
-        packet.writeDouble(0);
-        packet.writeFloat(0);
-        packet.writeFloat(0);
-        packet.writeByte(0);
-        writeVarInt(packet, 0);
+        writeVarInt(packet, 0x08);
+        packet.writeDouble(0); // X
+        packet.writeDouble(64); // Y
+        packet.writeDouble(0); // Z
+        packet.writeFloat(0); // Yaw
+        packet.writeFloat(0); // Pitch
+        packet.writeByte(0); // Flags
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
         output.flush();
     }
 
-    // ==================== 发送玩家能力 ====================
+    // ==================== 发送 Player Abilities (0x39) ====================
     private static void sendPlayerAbilities(DataOutputStream output) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         DataOutputStream packet = new DataOutputStream(buffer);
-        writeVarInt(packet, 0x32);
-        packet.writeByte(0x0F);
-        packet.writeFloat(0.05f);
-        packet.writeFloat(0.1f);
+        writeVarInt(packet, 0x39);
+        packet.writeByte(0x0F); // Flags: invulnerable, flying, allow flying, creative mode
+        packet.writeFloat(0.05f); // Flying speed
+        packet.writeFloat(0.1f); // Field of view
+        writeVarInt(output, buffer.size());
+        output.write(buffer.toByteArray());
+        output.flush();
+    }
+
+    // ==================== 发送空区块 (0x21) ====================
+    private static void sendEmptyChunk(DataOutputStream output) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        DataOutputStream packet = new DataOutputStream(buffer);
+        writeVarInt(packet, 0x21); // Chunk Data
+        packet.writeInt(0); // Chunk X
+        packet.writeInt(0); // Chunk Z
+        packet.writeBoolean(true); // Ground-Up Continuous
+        packet.writeShort(0); // Primary Bit Mask (0 = no sections)
+        // Data: 256 bytes of biome data (all plains)
+        byte[] biomeData = new byte[256];
+        Arrays.fill(biomeData, (byte) 1); // 1 = plains
+        writeVarInt(packet, biomeData.length);
+        packet.write(biomeData);
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
         output.flush();
@@ -913,24 +760,25 @@ public class PluginServer {
                 int packetId = readVarInt(packet);
 
                 switch (packetId) {
-                    case 0x12: // Keep Alive
+                    case 0x00: // Keep Alive (serverbound)
+                        // Ignore
                         break;
-                    case 0x05: // Chat Message
+                    case 0x01: // Chat Message (serverbound)
                         String message = readString(packet, 100);
                         handlePlayerChat(player, message);
                         break;
-                    case 0x1A: // Player Position
+                    case 0x04: // Player Position
                         player.x = packet.readDouble();
                         player.y = packet.readDouble();
                         player.z = packet.readDouble();
                         player.onGround = packet.readBoolean();
                         break;
-                    case 0x1B: // Player Rotation
+                    case 0x05: // Player Look
                         player.yaw = packet.readFloat();
                         player.pitch = packet.readFloat();
                         player.onGround = packet.readBoolean();
                         break;
-                    case 0x1C: // Player Position and Rotation
+                    case 0x06: // Player Position And Look
                         player.x = packet.readDouble();
                         player.y = packet.readDouble();
                         player.z = packet.readDouble();
@@ -938,12 +786,11 @@ public class PluginServer {
                         player.pitch = packet.readFloat();
                         player.onGround = packet.readBoolean();
                         break;
-                    case 0x1D: // Player Action
-                        int action = readVarInt(packet);
-                        int blockX = packet.readInt();
-                        int blockY = packet.readInt();
-                        int blockZ = packet.readInt();
-                        handleBlockAction(player, action, blockX, blockY, blockZ);
+                    case 0x07: // Player Digging
+                        // 忽略方块操作
+                        break;
+                    case 0x08: // Player Block Placement
+                        // 忽略
                         break;
                     default:
                         break;
@@ -952,19 +799,6 @@ public class PluginServer {
         } catch (IOException e) {
             onlinePlayers.remove(player.getUsername());
             logger.info("玩家 " + player.getUsername() + " 断开连接");
-        }
-    }
-
-    // ==================== 处理方块操作 ====================
-    private static void handleBlockAction(MCPlayer player, int action, int x, int y, int z) {
-        switch (action) {
-            case 0:
-            case 2:
-                serverAPI.setBlock(x, y, z, "air");
-                break;
-            case 3:
-                serverAPI.setBlock(x, y + 1, z, "stone");
-                break;
         }
     }
 
@@ -997,7 +831,7 @@ public class PluginServer {
 
         switch (command) {
             case "spawn":
-                player.teleport(0, 65, 0);
+                player.teleport(0, 64, 0);
                 player.sendMessage("§a已传送到出生点！");
                 break;
             case "plugins":
