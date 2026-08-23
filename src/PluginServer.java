@@ -14,13 +14,13 @@ import java.util.jar.JarEntry;
  * 支持插件系统、世界生成与持久化、玩家数据、建筑等
  * 无正版验证，性能优先
  * 
- * @version 5.0.0
+ * @version 5.1.0
  */
 public class PluginServer {
 
     // ==================== 服务器基本信息 ====================
     private static final Logger logger = Logger.getLogger("Mintropy");
-    private static String VERSION = "5.0.0";
+    private static String VERSION = "5.1.0";
     private static String MC_VERSION = "1.20.1";          // 兼容1.20.1
     private static int PROTOCOL_VERSION = 763;            // 1.20.1协议号
     private static int PORT = 25565;
@@ -676,18 +676,24 @@ public class PluginServer {
         packet.writeByte(-1); // Previous gamemode
         writeVarInt(packet, 1); // Dimension count
         writeString(packet, "minecraft:overworld"); // Dimension name
-        packet.writeByte(0); // ★ Registry Codec: empty NBT compound (TAG_End)
+
+        // ===== 修复：发送完整的空 NBT 复合标签 =====
+        packet.writeByte(0x0A); // TAG_Compound
+        packet.writeShort(0);   // 名称长度 0
+        packet.writeByte(0x00); // TAG_End
+        // ==========================================
+
         writeString(packet, "minecraft:overworld"); // Dimension type
         writeString(packet, "world"); // World name
         packet.writeLong(0); // Hashed seed
         writeVarInt(packet, MAX_PLAYERS); // Max players (VarInt)
         writeVarInt(packet, VIEW_DISTANCE);
         writeVarInt(packet, SIMULATION_DISTANCE);
-        packet.writeBoolean(false);
-        packet.writeBoolean(true);
-        packet.writeBoolean(false);
-        packet.writeBoolean(false);
-        packet.writeBoolean(false);
+        packet.writeBoolean(false); // Reduced debug info
+        packet.writeBoolean(true);  // Enable respawn screen
+        packet.writeBoolean(false); // Is debug
+        packet.writeBoolean(false); // Is flat
+        packet.writeBoolean(false); // Has death location
 
         writeVarInt(output, buffer.size());
         output.write(buffer.toByteArray());
