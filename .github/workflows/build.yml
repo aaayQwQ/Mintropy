@@ -1,10 +1,11 @@
-name: Build Mintropy Server
+name: Build Mintropy MC Server
 
 on:
   push:
     branches: [ main ]
     paths:
       - 'src/**'
+      - 'pom.xml'
       - '.github/workflows/build.yml'
   pull_request:
     branches: [ main ]
@@ -23,45 +24,44 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
+        cache: 'maven'
     
-    - name: Create build directory
-      run: mkdir -p build
-    
-    - name: Compile PluginServer
+    - name: Build with Maven
       run: |
-        javac -encoding UTF-8 -d build src/PluginServer.java
-        echo "编译完成"
+        mvn clean package -DskipTests
+        echo "Maven构建完成"
     
-    - name: Create API library
+    - name: List build output
       run: |
-        cd build
-        # 提取API接口类
-        jar cf plugin-server-api.jar PluginServer\$Plugin.class \
+        echo "构建产物:"
+        ls -la target/*.jar
+    
+    - name: Extract API classes
+      run: |
+        mkdir -p lib
+        cd target/classes
+        # 提取插件API接口类
+        jar cf ../../lib/plugin-server-api.jar \
+          PluginServer\$Plugin.class \
           PluginServer\$CommandExecutor.class \
           PluginServer\$ServerAPI.class
-        cd ..
-        mkdir -p lib
-        cp build/plugin-server-api.jar lib/
+        cd ../..
         echo "API库创建完成"
+        ls -la lib/
     
-    - name: Package server JAR
+    - name: Rename server JAR
       run: |
-        cd build
-        # 创建MANIFEST
-        echo "Main-Class: PluginServer" > MANIFEST.MF
-        echo "Class-Path: ." >> MANIFEST.MF
-        echo "" >> MANIFEST.MF
-        
-        # 打包所有类
-        jar cfm plugin-server.jar MANIFEST.MF *.class
-        cd ..
-        echo "服务器JAR打包完成"
+        # 找到主JAR文件（不是original的）
+        MAIN_JAR=$(ls target/*.jar | grep -v original | head -1)
+        cp "$MAIN_JAR" mintropy-server.jar
+        echo "服务器JAR: $MAIN_JAR -> mintropy-server.jar"
+        ls -la mintropy-server.jar
     
     - name: Upload server JAR
       uses: actions/upload-artifact@v4
       with:
-        name: plugin-server
-        path: build/plugin-server.jar
+        name: mintropy-server
+        path: mintropy-server.jar
         retention-days: 90
     
     - name: Upload API library
@@ -76,12 +76,23 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: v${{ github.run_number }}
-        name: Release v${{ github.run_number }}
-        files: |
-          build/plugin-server.jar
-          lib/plugin-server-api.jar
-        draft: false
-        prerelease: false
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: Mintropy MC Server v${{ github.run_number }}
+        body: |
+          ## Mintropy MC 服务器
+          
+          ### 构建信息
+          - 构建编号: ${{ github.run_number }}
+          - 提交: ${{ github.sha }}
+          - MC版本: 1.20.4
+          
+          ### 文件说明
+          - `mintropy-server.jar` - 服务器主程序
+          - `plugin-server-api.jar` - 插件开发API
+          
+          ### 使用方法
+          ```bash
+          # 运行服务器
+          java -jar mintropy-server.jar
+          
+          # 开发插件
+          javac -cp plugin-server-api.jar YourPlugin.java
