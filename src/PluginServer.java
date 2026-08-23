@@ -4,6 +4,9 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.logging.*;
 import java.nio.charset.StandardCharsets;
+import java.util.jar.JarFile;
+import java.util.jar.JarEntry;
+
 
 /**
  * Mintropy MC Server - 纯Java实现的Minecraft服务器
