@@ -6,8 +6,10 @@ import java.util.jar.*;
 import java.util.logging.*;
 
 /**
- * 插件服务器 - 单文件实现
- * 支持动态加载JAR插件，无需修改核心代码
+ * PluginServer - 插件化服务器
+ * 支持动态加载JAR插件，提供简单的API接口
+ * 
+ * @version 1.0.0
  */
 public class PluginServer {
     private static final Logger logger = Logger.getLogger("PluginServer");
@@ -17,6 +19,7 @@ public class PluginServer {
     private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
     private static volatile boolean running = false;
     private static ServerAPI serverAPI;
+    private static final String VERSION = "1.0.0";
 
     // ============ 插件接口 ============
     public interface Plugin {
@@ -27,6 +30,7 @@ public class PluginServer {
     }
 
     // ============ 命令执行器接口 ============
+    @FunctionalInterface
     public interface CommandExecutor {
         void onCommand(String command, String[] args);
     }
@@ -44,7 +48,7 @@ public class PluginServer {
         @Override
         public void registerCommand(String command, CommandExecutor executor) {
             commands.put(command.toLowerCase(), executor);
-            logger.info("注册命令: /" + command);
+            logger.info("[API] 注册命令: /" + command);
         }
 
         @Override
@@ -87,19 +91,28 @@ public class PluginServer {
 
     // ============ 主方法 ============
     public static void main(String[] args) {
+        printBanner();
         start();
         
         // 添加关闭钩子
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            stop();
+            if (running) {
+                stop();
+            }
         }));
+    }
+
+    // ============ 打印横幅 ============
+    private static void printBanner() {
+        System.out.println("=================================");
+        System.out.println("   Mintropy Server v" + VERSION);
+        System.out.println("   插件化服务器");
+        System.out.println("=================================");
     }
 
     // ============ 启动服务器 ============
     public static void start() {
-        logger.info("=================================");
-        logger.info("  插件服务器启动中...");
-        logger.info("=================================");
+        logger.info("正在启动插件服务器...");
         running = true;
         
         // 初始化服务器API
@@ -193,7 +206,7 @@ public class PluginServer {
             // 实例化插件
             Plugin plugin = (Plugin) pluginClass.getDeclaredConstructor().newInstance();
             
-            // 注入服务器API（通过反射）
+            // 注入服务器API
             injectServerAPI(plugin, serverAPI);
             
             // 注册插件
@@ -247,7 +260,6 @@ public class PluginServer {
     // ============ 注入服务器API ============
     private static void injectServerAPI(Plugin plugin, ServerAPI api) {
         try {
-            // 尝试通过setter方法注入
             Arrays.stream(plugin.getClass().getMethods())
                 .filter(method -> method.getName().equals("setServerAPI"))
                 .filter(method -> method.getParameterCount() == 1)
@@ -333,8 +345,11 @@ public class PluginServer {
                 reloadPlugins();
                 break;
                 
+            case "version":
+                logger.info("Mintropy Server v" + VERSION);
+                break;
+                
             default:
-                // 检查是否是插件注册的命令
                 CommandExecutor executor = commands.get(command);
                 if (executor != null) {
                     try {
@@ -382,10 +397,11 @@ public class PluginServer {
     // ============ 显示帮助 ============
     private static void showHelp() {
         System.out.println("\n========== 可用命令 ==========");
-        System.out.println("  stop    - 停止服务器");
-        System.out.println("  plugins - 列出所有插件");
-        System.out.println("  reload  - 重新加载插件");
-        System.out.println("  help    - 显示此帮助");
+        System.out.println("  stop     - 停止服务器");
+        System.out.println("  plugins  - 列出所有插件");
+        System.out.println("  reload   - 重新加载插件");
+        System.out.println("  version  - 显示版本信息");
+        System.out.println("  help     - 显示此帮助");
         
         if (!commands.isEmpty()) {
             System.out.println("\n插件命令:");
