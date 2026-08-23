@@ -780,11 +780,11 @@ public class PluginServer {
         writeNBTCompoundEnd(out);
     }
 
-    // ==================== NBT 写入辅助方法 ====================
+    // ==================== NBT 写入辅助方法（修正版，无重复） ====================
     private static void writeNBTCompoundStart(DataOutputStream out, String name) throws IOException {
         if (!name.isEmpty()) {
             out.writeByte(0x0A); // TAG_Compound
-            writeNBTString(out, name);
+            writeNBTStringValue(out, name);
         } else {
             out.writeByte(0x0A);
         }
@@ -794,15 +794,10 @@ public class PluginServer {
         out.writeByte(0x00); // TAG_End
     }
 
-    private static void writeNBTString(DataOutputStream out, String name) throws IOException {
-        out.writeByte(0x08); // TAG_String
-        writeNBTString(out, name);
-    }
-
     private static void writeNBTString(DataOutputStream out, String name, String value) throws IOException {
-        out.writeByte(0x08);
-        writeNBTString(out, name);
-        writeNBTString(out, value);
+        out.writeByte(0x08); // TAG_String
+        writeNBTStringValue(out, name);
+        writeNBTStringValue(out, value);
     }
 
     private static void writeNBTStringValue(DataOutputStream out, String value) throws IOException {
@@ -813,71 +808,47 @@ public class PluginServer {
 
     private static void writeNBTInt(DataOutputStream out, String name, int value) throws IOException {
         out.writeByte(0x03); // TAG_Int
-        writeNBTString(out, name);
+        writeNBTStringValue(out, name);
         out.writeInt(value);
     }
 
     private static void writeNBTLong(DataOutputStream out, String name, long value) throws IOException {
         out.writeByte(0x04); // TAG_Long
-        writeNBTString(out, name);
+        writeNBTStringValue(out, name);
         out.writeLong(value);
     }
 
     private static void writeNBTBool(DataOutputStream out, String name, boolean value) throws IOException {
         out.writeByte(0x01); // TAG_Byte
-        writeNBTString(out, name);
+        writeNBTStringValue(out, name);
         out.writeByte(value ? 1 : 0);
     }
 
     private static void writeNBTByte(DataOutputStream out, String name, byte value) throws IOException {
         out.writeByte(0x01); // TAG_Byte
-        writeNBTString(out, name);
+        writeNBTStringValue(out, name);
         out.writeByte(value);
     }
 
     private static void writeNBTDouble(DataOutputStream out, String name, double value) throws IOException {
         out.writeByte(0x06); // TAG_Double
-        writeNBTString(out, name);
+        writeNBTStringValue(out, name);
         out.writeDouble(value);
     }
 
-    private static void writeNBTListStart(DataOutputStream out, String name, int elementType) throws IOException {
-        out.writeByte(0x09); // TAG_List
-        writeNBTString(out, name);
-        out.writeByte(elementType);
-        out.writeInt(0); // 长度占位，稍后回填？为简单起见，直接写入0（表示空列表），但我们需要实际长度。
-        // 注意：这里需要回填列表长度。简化处理：我们预先知道条目数量，可以在循环前写入实际数量。
-    }
-
-    // 修正：列表长度需要在实际写入元素前写入正确数量
-    // 由于我们只写入一个元素，可以改为直接使用 writeNBTListStart 后写入元素，再手动回填长度比较复杂。
-    // 为简化，我们使用 ByteArrayOutputStream 构建列表内容，然后写入长度和内容。
-    // 但为了代码简洁，我们假设每个列表只有一个元素，直接在 writeNBTListStart 中写入长度1。
-    // 所以需要单独定义方法 writeNBTListStartWithCount。
-
     private static void writeNBTListStartWithCount(DataOutputStream out, String name, int elementType, int count) throws IOException {
-        out.writeByte(0x09);
-        writeNBTString(out, name);
+        out.writeByte(0x09); // TAG_List
+        writeNBTStringValue(out, name);
         out.writeByte(elementType);
         out.writeInt(count);
     }
 
-    // 为方便，重载：
     private static void writeNBTListStart(DataOutputStream out, String name, int elementType) throws IOException {
-        // 默认长度1
         writeNBTListStartWithCount(out, name, elementType, 1);
     }
 
     private static void writeNBTListEnd(DataOutputStream out) throws IOException {
-        // 列表不需要显式结束，只要长度正确即可
-        // 但为了结构清晰，什么也不做
-    }
-
-    // 字符串写入（不带标签）
-    private static void writeNBTString(DataOutputStream out, String value) throws IOException {
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        out.writeShort(bytes.length);
-        out.write(bytes);
+        // do nothing
     }
 
     // ==================== 发送加入游戏包 ====================
